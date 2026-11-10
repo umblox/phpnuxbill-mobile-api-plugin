@@ -43,16 +43,15 @@ function mobile_api_config()
     $ui->display('mobile_api_config.tpl');
 }
 
-// 4. Tangkap otomatis panggilan API dari Aplikasi Mobile (?r=mobile_api atau ?r=apiv1)
-//    Eksekusi berhenti di sini (exit) sehingga system/controllers/apiv1.php tidak diperlukan lagi
+// 4. Tangkap panggilan API dari Aplikasi Mobile (?r=plugin/mobile_api atau ?r=mobile_api)
 $_req_route = trim($_GET['r'] ?? $_POST['r'] ?? $_GET['_route'] ?? '');
 if (
     strpos($_req_route, 'mobile_api') === 0 ||
-    strpos($_req_route, 'plugin/mobile_api') === 0 ||
-    strpos($_req_route, 'apiv1') === 0
+    strpos($_req_route, 'plugin/mobile_api') === 0
 ) {
-    if ($_req_route !== 'plugin/mobile_api_config') {
+    if ($_req_route !== 'plugin/mobile_api_config' && $_req_route !== 'mobile_api_config') {
         require_once __DIR__ . '/mobile_api_modules/dispatcher.php';
         exit;
     }
 }
+
