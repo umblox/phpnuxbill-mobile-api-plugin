@@ -186,8 +186,17 @@ switch ($action) {
     case 'admin_genieacs_wan_save':
     case 'admin_genieacs_wlan_save':
     case 'customer_genieacs_dashboard':
+    case 'genieacs_customer_dashboard':
+    case 'my_device':
+    case 'customer_device':
     case 'customer_genieacs_wlan_save':
+    case 'genieacs_customer_wlan_edit':
+    case 'customer_wifi_save':
     case 'customer_genieacs_reboot':
+    case 'genieacs_customer_reboot':
+    case 'customer_device_reboot':
+    case 'customer_genieacs_summon':
+    case 'customer_device_refresh':
         require __DIR__ . '/plugin_genieacs.php';
         break;
 
