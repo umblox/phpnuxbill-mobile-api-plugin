@@ -2,10 +2,10 @@
 /**
  * PHPNuxBill Mobile API Plugin - Main Dispatcher
  * Path: system/plugin/mobile_api_modules/dispatcher.php
- * Dipanggil melalui gerbang resmi system/api.php
+ * Dipanggil melalui gerbang resmi system/api.php?r=plugin/mobile_api
  */
 
-global $config, $admin, $user, $ui, $routes, $_app_stage, $DEVICE_PATH, $PAYMENTGATEWAY_PATH, $UPLOAD_PATH, $CACHE_PATH, $isApi, $zero, $isChangePlan;
+global $config, $_c, $admin, $user, $ui, $routes, $_app_stage, $root_path, $DEVICE_PATH, $PAYMENTGATEWAY_PATH, $UPLOAD_PATH, $CACHE_PATH, $PLUGIN_PATH, $isApi, $zero, $isChangePlan, $phpnux_root;
 
 $isApi = true;
 ob_start();
@@ -19,16 +19,6 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
     exit();
 }
 
-// Pastikan working directory berada di root instalasi PHPNuxBill (penting saat dipanggil dari system/api.php)
-$phpnux_root = dirname(__DIR__, 3);
-if (is_dir($phpnux_root . '/system') && getcwd() !== $phpnux_root) {
-    @chdir($phpnux_root);
-}
-
-if (empty($api_secret)) {
-    $api_secret = !empty($config['tawkto']) ? $config['tawkto'] : 'Arneta_WiFi_Secret_Key_2026_#99';
-}
-
 // Parse JSON body jika request dikirim dengan Content-Type: application/json
 $raw_input = json_decode(file_get_contents('php://input'), true);
 if (is_array($raw_input)) {
@@ -36,10 +26,16 @@ if (is_array($raw_input)) {
     $_REQUEST = array_merge($_REQUEST, $raw_input);
 }
 
-// Muat seluruh fungsi helper bersama
+// Muat bootstrap & seluruh fungsi helper bersama terlebih dahulu agar $config dan path resmi siap
 require_once __DIR__ . '/helpers_common.php';
 
-// Resolusi parameter $action dari system/api.php (?r=plugin/mobile_api/<action> atau ?r=apiv1/<action> atau &action=<action>)
+if (empty($api_secret)) {
+    $api_secret = !empty($config['tawkto'])
+        ? $config['tawkto']
+        : (!empty($config['api_key']) ? $config['api_key'] : 'PHPNuxBill_Mobile_API_Secret_Key');
+}
+
+// Resolusi parameter $action dari system/api.php (?r=plugin/mobile_api/<action> atau &action=<action>)
 $_raw_r = trim($_GET['r'] ?? $_POST['r'] ?? $_GET['_route'] ?? '');
 $_r_parts = array_values(array_filter(explode('/', $_raw_r)));
 
@@ -219,7 +215,7 @@ switch ($action) {
 
     default:
         api_out(true, 'PHPNuxBill Mobile REST API Plugin Ready (Connected via system/api.php)', [
-            'version' => '2.5.0',
+            'version' => '3.0.0',
             'action'  => $action
         ]);
         break;
