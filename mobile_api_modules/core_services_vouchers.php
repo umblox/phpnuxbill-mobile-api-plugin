@@ -4,6 +4,28 @@
  * Path: system/plugin/mobile_api_modules/core_services_vouchers.php
  */
 
+global $config, $_c, $admin, $ui, $UPLOAD_PATH, $DEVICE_PATH, $zero, $_app_stage, $isChangePlan;
+
+// Helper lokal untuk memastikan channel notifikasi pembayaran pelanggan aktif sesuai setting gateway web
+if (!function_exists('ensure_official_payment_notif_channel')) {
+    function ensure_official_payment_notif_channel() {
+        global $config, $_c;
+        $cur = strtolower(trim((string)($config['user_notification_payment'] ?? '')));
+        if ($cur === '' || $cur === 'none') {
+            if (!empty($config['wa_url'])) {
+                $config['user_notification_payment'] = 'wa';
+                $_c['user_notification_payment']     = 'wa';
+            } elseif (!empty($config['sms_url'])) {
+                $config['user_notification_payment'] = 'sms';
+                $_c['user_notification_payment']     = 'sms';
+            } elseif (!empty($config['smtp_host'])) {
+                $config['user_notification_payment'] = 'email';
+                $_c['user_notification_payment']     = 'email';
+            }
+        }
+    }
+}
+
 switch ($action) {
     // =========================================================================
     // LAYANAN: PELANGGAN AKTIF, ISI ULANG PAKET, ISI ULANG SALDO, VOUCHER
@@ -97,9 +119,10 @@ switch ($action) {
         break;
 
     case 'admin_prepaid_recharge':
-        // 100% Mengikuti alur asli system/controllers/plan.php (case 'recharge-post') & Package.php
-        global $zero;
+        // 100% Mengikuti alur resmi system/controllers/plan.php (case 'recharge-post') & Package.php
         $admin = require_admin_session($api_secret);
+        ensure_official_payment_notif_channel();
+
         $id_customer = (int)(_post('customer_id') ?: _post('id_customer'));
         $planId      = (int)(_post('plan_id') ?: _post('plan'));
         $using       = trim(_post('using') ?: 'Cash');
@@ -166,7 +189,8 @@ switch ($action) {
 
         $ok = false;
         if (class_exists('Package') && method_exists('Package', 'rechargeUser')) {
-            $ok = @Package::rechargeUser($id_customer, $server, $planId, $gateway, $channel);
+            // Package::rechargeUser otomatis memanggil Package::createInvoice($in) (Telegram Admin + WA/SMS/Email Pelanggan)
+            $ok = Package::rechargeUser($id_customer, $server, $planId, $gateway, $channel);
         }
         unset($zero, $GLOBALS['zero']);
 
@@ -244,7 +268,6 @@ switch ($action) {
         break;
 
     case 'admin_prepaid_edit':
-        global $_app_stage;
         $admin = require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
         $id         = (int)_post('id');
         $id_plan    = (int)_post('id_plan');
@@ -307,7 +330,6 @@ switch ($action) {
         break;
 
     case 'admin_prepaid_extend':
-        global $_app_stage, $isChangePlan;
         $admin = require_admin_session($api_secret, ['SuperAdmin', 'Admin', 'Agent']);
         $id   = (int)_req('id');
         $days = max(1, (int)(_req('days') ?: 3));
@@ -353,7 +375,10 @@ switch ($action) {
         break;
 
     case 'admin_deposit':
+        // 100% Mengikuti alur resmi system/controllers/plan.php (case 'deposit-post') & Package::rechargeBalance
         $admin = require_admin_session($api_secret);
+        ensure_official_payment_notif_channel();
+
         $user_id    = (int)(_post('customer_id') ?: _post('id_customer'));
         $plan_id    = (int)(_post('plan_id') ?: _post('id_plan'));
         $custom_amt = (float)_post('amount');
@@ -383,7 +408,7 @@ switch ($action) {
             $price_amt  = $custom_amt;
 
             if (class_exists('Package') && method_exists('Package', 'rechargeBalance')) {
-                $trxId = (int)@Package::rechargeBalance($c, $plan, 'Deposit', $admin_name, $note);
+                $trxId = (int)Package::rechargeBalance($c, $plan, 'Deposit', $admin_name, $note);
             }
         } elseif ($plan_id > 0) {
             $p = ORM::for_table('tbl_plans')->find_one($plan_id);
@@ -394,7 +419,7 @@ switch ($action) {
             $price_amt  = (float)$p['price'];
 
             if (class_exists('Package') && method_exists('Package', 'rechargeBalance')) {
-                $trxId = (int)@Package::rechargeBalance($c, $p, 'Deposit', $admin_name, $note);
+                $trxId = (int)Package::rechargeBalance($c, $p, 'Deposit', $admin_name, $note);
             }
         } else {
             api_out(false, 'Pilih paket saldo atau masukkan nominal top-up terlebih dahulu.', null, 400);
@@ -404,15 +429,6 @@ switch ($action) {
             $c_fresh = ORM::for_table('tbl_customers')->find_one($user_id);
             $new_bal = $c_fresh ? (float)$c_fresh['balance'] : ((float)$c['balance'] + $price_amt);
             $in = ORM::for_table('tbl_transactions')->find_one($trxId);
-
-            $tg_msg = "#u" . $c['username'] . " " . $c['fullname'] . " #deposit #Balance \n"
-                . $plan_label
-                . "\nGateway: Deposit"
-                . "\nChannel: " . $admin_name
-                . "\nAmount: " . $currency . " " . number_format($price_amt, 0, ',', '.')
-                . "\nNew Balance: " . $currency . " " . number_format($new_bal, 0, ',', '.')
-                . (!empty($note) ? "\nNote:\n" . $note : "");
-            notify_telegram_admin($tg_msg);
 
             write_admin_log($admin, '[' . $admin['username'] . ']: Deposit ' . $c['username'] . ' [' . $plan_label . '][' . $currency . ' ' . number_format($price_amt, 0, ',', '.') . ']');
             unset($_SESSION['notify'], $_SESSION['ntype']);
@@ -486,7 +502,7 @@ switch ($action) {
         }
 
         api_out(true, 'Daftar voucher dimuat', [
-            'voucher_prefix' => $config['voucher_prefix'] ?? 'ARN-',
+            'voucher_prefix' => $config['voucher_prefix'] ?? '',
             'vouchers'       => $vouchers
         ]);
         break;
@@ -512,18 +528,17 @@ switch ($action) {
             api_out(false, 'The Length Code must be more than 6 for numbers (Minimal 6 digit untuk format angka).', null, 400);
         }
 
-        if ($prefix !== '') {
-            $cfg_pref = ORM::for_table('tbl_appconfig')->where('setting', 'voucher_prefix')->find_one();
-            if ($cfg_pref) {
-                $cfg_pref->value = $prefix;
-                $cfg_pref->save();
-            } else {
-                $cfg_pref = ORM::for_table('tbl_appconfig')->create();
-                $cfg_pref->setting = 'voucher_prefix';
-                $cfg_pref->value   = $prefix;
-                $cfg_pref->save();
-            }
+        $cfg_pref = ORM::for_table('tbl_appconfig')->where('setting', 'voucher_prefix')->find_one();
+        if ($cfg_pref) {
+            $cfg_pref->value = $prefix;
+            $cfg_pref->save();
+        } else {
+            $cfg_pref = ORM::for_table('tbl_appconfig')->create();
+            $cfg_pref->setting = 'voucher_prefix';
+            $cfg_pref->value   = $prefix;
+            $cfg_pref->save();
         }
+        $config['voucher_prefix'] = $prefix;
 
         if (function_exists('run_hook')) {
             @run_hook('create_voucher');
@@ -628,6 +643,8 @@ switch ($action) {
 
     case 'admin_voucher_refill':
         $admin = require_admin_session($api_secret);
+        ensure_official_payment_notif_channel();
+
         $customer_id = (int)(_post('customer_id') ?: _post('id_customer'));
         $raw_code    = trim(_post('code'));
         $code        = (class_exists('Text') && method_exists('Text', 'alphanumeric'))
@@ -647,9 +664,13 @@ switch ($action) {
         }
 
         if (class_exists('Package') && Package::rechargeUser($user['id'], $v1['routers'], $v1['id_plan'], 'Voucher', $code)) {
-            $v1->status = '1';
-            $v1->user   = $user['username'];
+            $v1->status    = '1';
+            $v1->user      = $user['username'];
+            if (array_key_exists('used_date', $v1->as_array())) {
+                $v1->used_date = date('Y-m-d H:i:s');
+            }
             $v1->save();
+
             $in = ORM::for_table('tbl_transactions')->where('username', $user['username'])->order_by_desc('id')->find_one();
             unset($_SESSION['notify'], $_SESSION['ntype']);
             $in_arr = $in ? $in->as_array() : [
@@ -689,21 +710,32 @@ switch ($action) {
         }
 
         $cust = ORM::for_table('tbl_customers')->where('username', $in['username'])->find_one();
-        $cust_arr = $cust ? $cust->as_array() : ['id' => 0, 'username' => $in['username'], 'fullname' => $in['username'], 'phonenumber' => _post('phonenumber')];
+        $cust_arr = $cust ? $cust->as_array() : [
+            'id'          => 0,
+            'username'    => $in['username'],
+            'fullname'    => $in['username'],
+            'phonenumber' => _post('phonenumber')
+        ];
         $receipt = build_web_invoice_receipt($in->as_array(), $cust_arr, $config, $note);
-        $phone = trim($cust_arr['phonenumber'] ?? '');
+        $phone   = trim($cust_arr['phonenumber'] ?? '');
 
         $sent_via_gateway = false;
-        if (!empty($phone) && (!empty($config['wa_url']) || (class_exists('Message') && method_exists('Message', 'sendWhatsapp')))) {
+        if (!empty($phone) && !empty($config['wa_url']) && !empty($receipt['wa_web_text'])) {
             notify_whatsapp_customer($phone, $receipt['wa_web_text']);
             $sent_via_gateway = true;
         }
 
-        api_out(true, $sent_via_gateway ? ('Notifikasi Invoice berhasil dikirim ke WhatsApp ' . $phone . ' via Server Web!') : 'Membuka WhatsApp dengan template Invoice Web...', [
-            'sent_via_gateway' => $sent_via_gateway,
-            'phonenumber'      => $phone,
-            'wa_web_text'      => $receipt['wa_web_text'],
-            'receipt'          => $receipt
-        ]);
+        api_out(
+            true,
+            $sent_via_gateway
+                ? ('Invoice resmi berhasil dikirim ke WhatsApp ' . $phone . ' via Gateway Server!')
+                : 'Membuka WhatsApp dengan teks Invoice resmi Web...',
+            [
+                'sent_via_gateway' => $sent_via_gateway,
+                'phonenumber'      => $phone,
+                'wa_web_text'      => $receipt['wa_web_text'],
+                'receipt'          => $receipt
+            ]
+        );
         break;
 }
