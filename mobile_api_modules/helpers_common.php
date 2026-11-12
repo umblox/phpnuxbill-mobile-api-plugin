@@ -4,6 +4,65 @@
  * Path: system/plugin/mobile_api_modules/helpers_common.php
  */
 
+// =========================================================================
+// BOOTSTRAP LINGKUNGAN GLOBAL PHPNUXBILL (FIX PATH API.PHP & GLOBAL CONFIG)
+// =========================================================================
+$_root_dir = dirname(__DIR__, 3);
+if (is_dir($_root_dir . DIRECTORY_SEPARATOR . 'system') && basename((string)getcwd()) === 'system') {
+    @chdir($_root_dir);
+}
+
+global $config, $_c, $admin, $ui, $UPLOAD_PATH, $CACHE_PATH, $DEVICE_PATH, $PLUGIN_PATH, $PAYMENTGATEWAY_PATH;
+
+if (empty($GLOBALS['config']) && !empty($GLOBALS['_c']) && is_array($GLOBALS['_c'])) {
+    $GLOBALS['config'] = $GLOBALS['_c'];
+}
+if (empty($GLOBALS['config']) || !is_array($GLOBALS['config'])) {
+    $GLOBALS['config'] = [];
+    try {
+        foreach (ORM::for_table('tbl_appconfig')->find_array() as $_cfg_row) {
+            $GLOBALS['config'][$_cfg_row['setting']] = $_cfg_row['value'];
+        }
+    } catch (Exception $e) {}
+}
+$GLOBALS['_c'] = &$GLOBALS['config'];
+$config = &$GLOBALS['config'];
+$_c     = &$GLOBALS['config'];
+
+if (empty($GLOBALS['UPLOAD_PATH'])) {
+    $GLOBALS['UPLOAD_PATH'] = 'system/uploads';
+}
+if (empty($GLOBALS['CACHE_PATH'])) {
+    $GLOBALS['CACHE_PATH'] = 'system/cache';
+}
+if (empty($GLOBALS['DEVICE_PATH'])) {
+    $GLOBALS['DEVICE_PATH'] = 'system/devices';
+}
+if (empty($GLOBALS['PLUGIN_PATH'])) {
+    $GLOBALS['PLUGIN_PATH'] = 'system/plugin';
+}
+if (empty($GLOBALS['PAYMENTGATEWAY_PATH'])) {
+    $GLOBALS['PAYMENTGATEWAY_PATH'] = 'system/paymentgateway';
+}
+
+// Pastikan $ui selalu tersedia saat Package::createInvoice() memanggil $ui->assign() via api.php
+if (empty($GLOBALS['ui']) || !is_object($GLOBALS['ui'])) {
+    $GLOBALS['ui'] = new class {
+        public $vars = [];
+        public function assign($k, $v = null) {
+            if (is_array($k)) {
+                foreach ($k as $key => $val) $this->vars[$key] = $val;
+            } else {
+                $this->vars[$k] = $v;
+            }
+        }
+        public function get($k) { return $this->vars[$k] ?? null; }
+        public function fetch($tpl = '') { return ''; }
+        public function display($tpl = '') {}
+    };
+    $ui = $GLOBALS['ui'];
+}
+
 if (!function_exists('api_out')) {
     function api_out($success, $message, $result = null, $code = 200) {
         if (ob_get_length()) {
@@ -53,18 +112,15 @@ if (!function_exists('get_req_token')) {
 
 if (!function_exists('require_admin_session')) {
     function require_admin_session($secret, $allowed_roles = []) {
-        global $config, $admin, $action;
+        global $config, $admin;
 
-        $finalize_adm = function($adm) use ($allowed_roles, &$admin, $action) {
+        $finalize_adm = function($adm) use ($allowed_roles, &$admin) {
             if (!empty($allowed_roles) && !in_array($adm['user_type'], $allowed_roles)) {
                 api_out(false, 'Akses ditolak untuk level ' . $adm['user_type'], null, 403);
             }
             $_SESSION['aid'] = $adm['id'];
             $admin = $adm;
             $GLOBALS['admin'] = $adm;
-            if ($action !== 'webview_sso' && $action !== 'admin_webview_sso' && session_status() === PHP_SESSION_ACTIVE) {
-                @session_write_close();
-            }
             return $adm;
         };
 
@@ -112,13 +168,11 @@ if (!function_exists('require_admin_session')) {
 
 if (!function_exists('require_customer_session')) {
     function require_customer_session($secret) {
-        global $config, $action;
+        global $config;
 
-        $finalize_cust = function($cust) use ($action) {
+        $finalize_cust = function($cust) {
             $_SESSION['uid'] = $cust['id'];
-            if ($action !== 'webview_sso' && $action !== 'admin_webview_sso' && session_status() === PHP_SESSION_ACTIVE) {
-                @session_write_close();
-            }
+            $GLOBALS['user'] = $cust;
             return $cust;
         };
 
@@ -198,69 +252,107 @@ if (!function_exists('write_admin_log')) {
 
 if (!function_exists('notify_telegram_admin')) {
     function notify_telegram_admin($text) {
+        global $config;
         try {
             if (class_exists('Message') && method_exists('Message', 'sendTelegram')) {
-                @Message::sendTelegram($text);
+                return Message::sendTelegram($text);
             } elseif (function_exists('sendTelegram')) {
-                @sendTelegram($text);
+                return sendTelegram($text);
             }
         } catch (Exception $e) {}
+        return null;
     }
 }
 
 if (!function_exists('notify_whatsapp_customer')) {
     function notify_whatsapp_customer($phone, $text) {
-        if (empty($phone)) return;
+        global $config;
+        if (empty($phone) || empty($text)) return null;
         try {
             if (class_exists('Message') && method_exists('Message', 'sendWhatsapp')) {
-                @Message::sendWhatsapp($phone, $text);
+                return Message::sendWhatsapp($phone, $text);
             } elseif (function_exists('sendWhatsapp')) {
-                @sendWhatsapp($phone, $text);
+                return sendWhatsapp($phone, $text);
             }
         } catch (Exception $e) {}
+        return null;
     }
 }
 
 if (!function_exists('notify_sms_customer')) {
     function notify_sms_customer($phone, $text) {
-        if (empty($phone)) return;
+        global $config;
+        if (empty($phone) || empty($text)) return null;
         try {
             if (class_exists('Message') && method_exists('Message', 'sendSMS')) {
-                @Message::sendSMS($phone, $text);
+                return Message::sendSMS($phone, $text);
             } elseif (function_exists('sendSMS')) {
-                @sendSMS($phone, $text);
+                return sendSMS($phone, $text);
+            }
+        } catch (Exception $e) {}
+        return null;
+    }
+}
+
+/**
+ * Memicu pengiriman Invoice & Notifikasi Resmi PHPNuxBill (Telegram Admin + WA/SMS/Email Pelanggan)
+ * Persis seperti pemanggilan Package::createInvoice($in) di system/controllers/plan.php
+ */
+if (!function_exists('trigger_official_package_invoice')) {
+    function trigger_official_package_invoice($in) {
+        global $config, $_c, $admin, $ui, $UPLOAD_PATH;
+        if (!$in) return;
+
+        // Pastikan metode notifikasi pembayaran pelanggan aktif jika wa_url/sms_url sudah diset di web
+        $orig_notif_payment = $config['user_notification_payment'] ?? '';
+        if (empty($orig_notif_payment) || $orig_notif_payment === 'none') {
+            if (!empty($config['wa_url'])) {
+                $config['user_notification_payment'] = 'wa';
+                $_c['user_notification_payment']     = 'wa';
+            } elseif (!empty($config['sms_url'])) {
+                $config['user_notification_payment'] = 'sms';
+                $_c['user_notification_payment']     = 'sms';
+            }
+        }
+
+        try {
+            if (class_exists('Package') && method_exists('Package', 'createInvoice')) {
+                Package::createInvoice($in);
             }
         } catch (Exception $e) {}
     }
 }
 
 if (!function_exists('build_web_invoice_receipt')) {
-    function build_web_invoice_receipt($in, $cust, $config, $note = '') {
-        $currency = $config['currency_code'] ?? 'Rp.';
-        $comp_name = $config['CompanyName'] ?? 'Arneta.ID';
-        $comp_addr = $config['address'] ?? '';
-        $comp_phone = $config['phone'] ?? '';
+    function build_web_invoice_receipt($in, $cust, $config = null, $note = '') {
+        if (empty($config) || !is_array($config)) {
+            $config = $GLOBALS['config'] ?? [];
+        }
+        $currency    = $config['currency_code'] ?? 'Rp.';
+        $comp_name   = $config['CompanyName'] ?? 'PHPNuxBill';
+        $comp_addr   = $config['address'] ?? '';
+        $comp_phone  = $config['phone'] ?? '';
         $footer_note = $config['note'] ?? '';
 
-        $inv_no = !empty($in['invoice']) ? $in['invoice'] : ('INV-' . ($in['id'] ?? rand(100, 999)));
+        $inv_no    = !empty($in['invoice']) ? $in['invoice'] : ('INV-' . ($in['id'] ?? rand(100, 999)));
         $plan_name = $in['plan_name'] ?? '-';
-        $type = $in['type'] ?? ($cust['service_type'] ?? 'Hotspot');
+        $type      = $in['type'] ?? ($cust['service_type'] ?? 'Hotspot');
         $price_num = (float)($in['price'] ?? 0);
         $price_fmt = (class_exists('Lang') && method_exists('Lang', 'moneyFormat'))
             ? Lang::moneyFormat($price_num)
             : ($currency . ' ' . number_format($price_num, 0, ',', '.'));
 
         $raw_method = trim((string)($in['method'] ?? 'Cash'));
-        $m_parts = array_map('trim', explode('-', $raw_method, 2));
-        $pg_name = $m_parts[0] ?: $raw_method;
-        $ch_name = $m_parts[1] ?? $pg_name;
+        $m_parts    = array_map('trim', explode('-', $raw_method, 2));
+        $pg_name    = $m_parts[0] ?: $raw_method;
+        $ch_name    = $m_parts[1] ?? $pg_name;
 
-        $rech_date = trim(($in['recharged_on'] ?? date('Y-m-d')) . ' ' . ($in['recharged_time'] ?? date('H:i:s')));
-        $exp_date = trim(($in['expiration'] ?? '') . ' ' . ($in['time'] ?? ''));
+        $rech_date   = trim(($in['recharged_on'] ?? date('Y-m-d')) . ' ' . ($in['recharged_time'] ?? date('H:i:s')));
+        $exp_date    = trim(($in['expiration'] ?? '') . ' ' . ($in['time'] ?? ''));
         $date_pretty = (class_exists('Lang') && method_exists('Lang', 'dateAndTimeFormat') && !empty($in['recharged_on']))
             ? Lang::dateAndTimeFormat($in['recharged_on'], $in['recharged_time'] ?? '00:00:00')
             : $rech_date;
-        $exp_pretty = (class_exists('Lang') && method_exists('Lang', 'dateAndTimeFormat') && !empty($in['expiration']))
+        $exp_pretty  = (class_exists('Lang') && method_exists('Lang', 'dateAndTimeFormat') && !empty($in['expiration']))
             ? Lang::dateAndTimeFormat($in['expiration'], $in['time'] ?? '23:59:59')
             : ($exp_date ?: '-');
 
@@ -272,14 +364,7 @@ if (!function_exists('build_web_invoice_receipt')) {
         $is_balance = (strtoupper(trim($type)) === 'BALANCE');
         $tpl = '';
         if (class_exists('Lang') && method_exists('Lang', 'getNotifText')) {
-            $tpl = @Lang::getNotifText($is_balance ? 'invoice_balance' : 'invoice_paid');
-        }
-        if (empty(trim($tpl))) {
-            if ($is_balance) {
-                $tpl = "*[[company_name]]*\n[[address]]\n[[phone]]\n=========================================\nINVOICE: *[[invoice]]*\nTanggal: [[date]]\nMetode: [[payment_gateway]] - [[payment_channel]]\nLayanan: *[[type]]* ([[plan_name]])\nNominal: *[[plan_price]]*\n\nPelanggan: *[[name]]* (@[[user_name]])\nSaldo Saat Ini: *[[current_balance]]*\n=========================================\n[[footer]]";
-            } else {
-                $tpl = "*[[company_name]]*\n[[address]]\n[[phone]]\n=========================================\nINVOICE: *[[invoice]]*\nTanggal: [[date]]\nMetode: [[payment_gateway]] - [[payment_channel]]\nLayanan: *[[type]]*\nPaket: *[[plan_name]]*\nTotal: *[[plan_price]]*\n\nPelanggan: *[[name]]*\nUsername: *[[user_name]]*\nAktif s/d: *[[expired_date]]*\n=========================================\n[[footer]]";
-            }
+            $tpl = (string)Lang::getNotifText($is_balance ? 'invoice_balance' : 'invoice_paid');
         }
 
         $wa_text = str_replace(
@@ -292,7 +377,8 @@ if (!function_exists('build_web_invoice_receipt')) {
             [
                 $comp_name, $comp_addr, $comp_phone, $inv_no, $date_pretty,
                 $pg_name, $ch_name, $type, $plan_name,
-                $price_fmt, $cust['fullname'] ?? $cust['username'], $note, $cust['username'] ?? '-', $cust['password'] ?? '***',
+                $price_fmt, $cust['fullname'] ?? ($cust['username'] ?? '-'), $note ?: ($cust['note'] ?? ''),
+                $cust['username'] ?? '-', $cust['password'] ?? '',
                 $exp_pretty, $bal_fmt, $footer_note
             ],
             $tpl
@@ -446,7 +532,7 @@ if (!defined('U') && defined('APP_URL')) {
 if (!function_exists('sendTelegram')) {
     function sendTelegram($text) {
         if (class_exists('Message') && method_exists('Message', 'sendTelegram')) {
-            @Message::sendTelegram($text);
+            return Message::sendTelegram($text);
         }
     }
 }
