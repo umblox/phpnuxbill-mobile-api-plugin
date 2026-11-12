@@ -4,16 +4,40 @@
  * Path: system/plugin/mobile_api_modules/helpers_common.php
  */
 
-// =========================================================================
-// BOOTSTRAP LINGKUNGAN GLOBAL PHPNUXBILL (FIX PATH API.PHP & GLOBAL CONFIG)
-// =========================================================================
-$_root_dir = dirname(__DIR__, 3);
-if (is_dir($_root_dir . DIRECTORY_SEPARATOR . 'system') && basename((string)getcwd()) === 'system') {
-    @chdir($_root_dir);
+global $config, $_c, $admin, $user, $ui, $root_path, $UPLOAD_PATH, $CACHE_PATH, $DEVICE_PATH, $PLUGIN_PATH, $PAYMENTGATEWAY_PATH, $phpnux_root;
+
+// 1. Pastikan working directory berada di root instalasi PHPNuxBill
+$phpnux_root = dirname(__DIR__, 3);
+if (is_dir($phpnux_root . DIRECTORY_SEPARATOR . 'system') && getcwd() !== $phpnux_root) {
+    @chdir($phpnux_root);
 }
+$GLOBALS['phpnux_root'] = $phpnux_root;
 
-global $config, $_c, $admin, $ui, $UPLOAD_PATH, $CACHE_PATH, $DEVICE_PATH, $PLUGIN_PATH, $PAYMENTGATEWAY_PATH;
+// 2. Normalisasi $root_path & seluruh variabel path global yang sebelumnya diset '../' oleh system/api.php
+$GLOBALS['root_path']           = '';
+$GLOBALS['UPLOAD_PATH']         = 'system/uploads';
+$GLOBALS['CACHE_PATH']          = 'system/cache';
+$GLOBALS['DEVICE_PATH']         = 'system/devices';
+$GLOBALS['PLUGIN_PATH']         = 'system/plugin';
+$GLOBALS['PAYMENTGATEWAY_PATH'] = 'system/paymentgateway';
 
+$root_path           = &$GLOBALS['root_path'];
+$UPLOAD_PATH         = &$GLOBALS['UPLOAD_PATH'];
+$CACHE_PATH          = &$GLOBALS['CACHE_PATH'];
+$DEVICE_PATH         = &$GLOBALS['DEVICE_PATH'];
+$PLUGIN_PATH         = &$GLOBALS['PLUGIN_PATH'];
+$PAYMENTGATEWAY_PATH = &$GLOBALS['PAYMENTGATEWAY_PATH'];
+
+// 3. Daftarkan Autoloader absolut ke system/autoload/ agar class Message, Http, Package, Lang, dll tidak pernah gagal dimuat
+spl_autoload_register(function ($class) use ($phpnux_root) {
+    $classFile = str_replace('_', DIRECTORY_SEPARATOR, $class) . '.php';
+    $absPath   = $phpnux_root . DIRECTORY_SEPARATOR . 'system' . DIRECTORY_SEPARATOR . 'autoload' . DIRECTORY_SEPARATOR . $classFile;
+    if (file_exists($absPath)) {
+        require_once $absPath;
+    }
+}, true, true);
+
+// 4. Sinkronisasi variabel $config dan $_c dari tbl_appconfig
 if (empty($GLOBALS['config']) && !empty($GLOBALS['_c']) && is_array($GLOBALS['_c'])) {
     $GLOBALS['config'] = $GLOBALS['_c'];
 }
@@ -29,23 +53,7 @@ $GLOBALS['_c'] = &$GLOBALS['config'];
 $config = &$GLOBALS['config'];
 $_c     = &$GLOBALS['config'];
 
-if (empty($GLOBALS['UPLOAD_PATH'])) {
-    $GLOBALS['UPLOAD_PATH'] = 'system/uploads';
-}
-if (empty($GLOBALS['CACHE_PATH'])) {
-    $GLOBALS['CACHE_PATH'] = 'system/cache';
-}
-if (empty($GLOBALS['DEVICE_PATH'])) {
-    $GLOBALS['DEVICE_PATH'] = 'system/devices';
-}
-if (empty($GLOBALS['PLUGIN_PATH'])) {
-    $GLOBALS['PLUGIN_PATH'] = 'system/plugin';
-}
-if (empty($GLOBALS['PAYMENTGATEWAY_PATH'])) {
-    $GLOBALS['PAYMENTGATEWAY_PATH'] = 'system/paymentgateway';
-}
-
-// Pastikan $ui selalu tersedia saat Package::createInvoice() memanggil $ui->assign() via api.php
+// 5. Pastikan objek $ui selalu tersedia ketika Package::createInvoice() memanggil $ui->assign()
 if (empty($GLOBALS['ui']) || !is_object($GLOBALS['ui'])) {
     $GLOBALS['ui'] = new class {
         public $vars = [];
@@ -61,6 +69,11 @@ if (empty($GLOBALS['ui']) || !is_object($GLOBALS['ui'])) {
         public function display($tpl = '') {}
     };
     $ui = $GLOBALS['ui'];
+}
+
+if (!defined('U') && defined('APP_URL')) {
+    $clean_u_root = preg_replace('#/system/?$#i', '', rtrim(APP_URL, '/'));
+    define('U', $clean_u_root . '/?_route=');
 }
 
 if (!function_exists('api_out')) {
@@ -250,9 +263,39 @@ if (!function_exists('write_admin_log')) {
     }
 }
 
+/**
+ * Mengambil teks template resmi dari Lang::getNotifText() atau file notifications.json / notifications.default.json
+ */
+if (!function_exists('get_official_notif_template')) {
+    function get_official_notif_template($key) {
+        global $UPLOAD_PATH, $phpnux_root;
+        if (class_exists('Lang') && method_exists('Lang', 'getNotifText')) {
+            $txt = Lang::getNotifText($key);
+            if (!empty($txt)) {
+                return (string)$txt;
+            }
+        }
+        $up_dir   = !empty($UPLOAD_PATH) ? $UPLOAD_PATH : 'system/uploads';
+        $root_dir = !empty($phpnux_root) ? $phpnux_root : dirname(__DIR__, 3);
+        foreach ([
+            $root_dir . DIRECTORY_SEPARATOR . $up_dir . DIRECTORY_SEPARATOR . 'notifications.json',
+            $root_dir . DIRECTORY_SEPARATOR . $up_dir . DIRECTORY_SEPARATOR . 'notifications.default.json'
+        ] as $fPath) {
+            if (file_exists($fPath)) {
+                $json = json_decode((string)@file_get_contents($fPath), true);
+                if (is_array($json) && !empty($json[$key])) {
+                    return (string)$json[$key];
+                }
+            }
+        }
+        return '';
+    }
+}
+
 if (!function_exists('notify_telegram_admin')) {
     function notify_telegram_admin($text) {
-        global $config;
+        global $config, $_c;
+        if (empty($text)) return null;
         try {
             if (class_exists('Message') && method_exists('Message', 'sendTelegram')) {
                 return Message::sendTelegram($text);
@@ -266,7 +309,7 @@ if (!function_exists('notify_telegram_admin')) {
 
 if (!function_exists('notify_whatsapp_customer')) {
     function notify_whatsapp_customer($phone, $text) {
-        global $config;
+        global $config, $_c;
         if (empty($phone) || empty($text)) return null;
         try {
             if (class_exists('Message') && method_exists('Message', 'sendWhatsapp')) {
@@ -281,7 +324,7 @@ if (!function_exists('notify_whatsapp_customer')) {
 
 if (!function_exists('notify_sms_customer')) {
     function notify_sms_customer($phone, $text) {
-        global $config;
+        global $config, $_c;
         if (empty($phone) || empty($text)) return null;
         try {
             if (class_exists('Message') && method_exists('Message', 'sendSMS')) {
@@ -294,32 +337,12 @@ if (!function_exists('notify_sms_customer')) {
     }
 }
 
-/**
- * Memicu pengiriman Invoice & Notifikasi Resmi PHPNuxBill (Telegram Admin + WA/SMS/Email Pelanggan)
- * Persis seperti pemanggilan Package::createInvoice($in) di system/controllers/plan.php
- */
-if (!function_exists('trigger_official_package_invoice')) {
-    function trigger_official_package_invoice($in) {
-        global $config, $_c, $admin, $ui, $UPLOAD_PATH;
-        if (!$in) return;
-
-        // Pastikan metode notifikasi pembayaran pelanggan aktif jika wa_url/sms_url sudah diset di web
-        $orig_notif_payment = $config['user_notification_payment'] ?? '';
-        if (empty($orig_notif_payment) || $orig_notif_payment === 'none') {
-            if (!empty($config['wa_url'])) {
-                $config['user_notification_payment'] = 'wa';
-                $_c['user_notification_payment']     = 'wa';
-            } elseif (!empty($config['sms_url'])) {
-                $config['user_notification_payment'] = 'sms';
-                $_c['user_notification_payment']     = 'sms';
-            }
+if (!function_exists('sendTelegram')) {
+    function sendTelegram($text) {
+        if (class_exists('Message') && method_exists('Message', 'sendTelegram')) {
+            return Message::sendTelegram($text);
         }
-
-        try {
-            if (class_exists('Package') && method_exists('Package', 'createInvoice')) {
-                Package::createInvoice($in);
-            }
-        } catch (Exception $e) {}
+        return null;
     }
 }
 
@@ -362,24 +385,21 @@ if (!function_exists('build_web_invoice_receipt')) {
             : ($currency . ' ' . number_format($cur_bal, 0, ',', '.'));
 
         $is_balance = (strtoupper(trim($type)) === 'BALANCE');
-        $tpl = '';
-        if (class_exists('Lang') && method_exists('Lang', 'getNotifText')) {
-            $tpl = (string)Lang::getNotifText($is_balance ? 'invoice_balance' : 'invoice_paid');
-        }
+        $tpl = get_official_notif_template($is_balance ? 'invoice_balance' : 'invoice_paid');
 
         $wa_text = str_replace(
             [
                 '[[company_name]]', '[[address]]', '[[phone]]', '[[invoice]]', '[[date]]',
                 '[[payment_gateway]]', '[[payment_channel]]', '[[type]]', '[[plan_name]]',
                 '[[plan_price]]', '[[name]]', '[[note]]', '[[user_name]]', '[[user_password]]',
-                '[[expired_date]]', '[[current_balance]]', '[[footer]]'
+                '[[expired_date]]', '[[current_balance]]', '[[footer]]', '[[bills]]', '[[additional_cost]]'
             ],
             [
                 $comp_name, $comp_addr, $comp_phone, $inv_no, $date_pretty,
                 $pg_name, $ch_name, $type, $plan_name,
                 $price_fmt, $cust['fullname'] ?? ($cust['username'] ?? '-'), $note ?: ($cust['note'] ?? ''),
                 $cust['username'] ?? '-', $cust['password'] ?? '',
-                $exp_pretty, $bal_fmt, $footer_note
+                $exp_pretty, $bal_fmt, $footer_note, '', ''
             ],
             $tpl
         );
@@ -521,19 +541,6 @@ if (!function_exists('connect_ros')) {
             }
         }
         return null;
-    }
-}
-
-if (!defined('U') && defined('APP_URL')) {
-    $clean_u_root = preg_replace('#/system/?$#i', '', rtrim(APP_URL, '/'));
-    define('U', $clean_u_root . '/?_route=');
-}
-
-if (!function_exists('sendTelegram')) {
-    function sendTelegram($text) {
-        if (class_exists('Message') && method_exists('Message', 'sendTelegram')) {
-            return Message::sendTelegram($text);
-        }
     }
 }
 
