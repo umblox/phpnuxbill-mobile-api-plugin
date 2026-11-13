@@ -4,12 +4,13 @@
  * Path: system/plugin/mobile_api_modules/core_settings_staff.php
  */
 
+global $config, $_c, $admin, $ui, $UPLOAD_PATH, $CACHE_PATH, $DEVICE_PATH, $phpnux_root, $_app_stage;
+
 switch ($action) {
     // =========================================================================
     // PENGATURAN SISTEM, LOKALISASI, MAINTENANCE, STAF, NOTIFIKASI & DB STATUS
     // =========================================================================
     case 'admin_settings':
-        global $UPLOAD_PATH;
         require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
         $rows = ORM::for_table('tbl_appconfig')->find_array();
         $settings_out = [];
@@ -42,16 +43,19 @@ switch ($action) {
             foreach ($settings_payload as $k => $v) {
                 if (in_array($k, ['action', 'token', 'r', '_route', 'settings', 'csrf_token'])) continue;
                 if (is_array($v)) continue;
+                $val_str = (string)$v;
                 $row = ORM::for_table('tbl_appconfig')->where('setting', $k)->find_one();
                 if ($row) {
-                    $row->value = (string)$v;
+                    $row->value = $val_str;
                     $row->save();
                 } else {
                     $row = ORM::for_table('tbl_appconfig')->create();
                     $row->setting = $k;
-                    $row->value   = (string)$v;
+                    $row->value   = $val_str;
                     $row->save();
                 }
+                $config[$k] = $val_str;
+                $_c[$k]     = $val_str;
             }
         }
         write_admin_log($admin, class_exists('Lang') ? Lang::T('Settings Saved Successfully') : 'Memperbarui pengaturan aplikasi');
@@ -62,50 +66,78 @@ switch ($action) {
         require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
         $channel = strtolower(trim(_req('channel') ?: 'wa')); // wa | sms | email | tg
         $target  = trim(_req('target'));
+        $comp    = $config['CompanyName'] ?? 'PHPNuxBill';
 
         if ($channel === 'wa') {
-            if (empty($target)) api_out(false, 'Masukkan nomor WhatsApp tujuan tes.', null, 400);
-            $res = (class_exists('Message') && method_exists('Message', 'sendWhatsapp'))
-                ? Message::sendWhatsapp($target, 'PHPNuxBill Test Whatsapp')
-                : notify_whatsapp_customer($target, 'PHPNuxBill Test Whatsapp');
-            api_out(true, 'Test Whatsapp has been sent. Result: ' . (is_string($res) ? $res : 'OK'));
-        } elseif ($channel === 'sms') {
-            if (empty($target)) api_out(false, 'Masukkan nomor HP tujuan tes SMS.', null, 400);
-            $res = (class_exists('Message') && method_exists('Message', 'sendSMS'))
-                ? Message::sendSMS($target, 'PHPNuxBill Test SMS')
-                : notify_sms_customer($target, 'PHPNuxBill Test SMS');
-            api_out(true, 'Test SMS has been sent. Result: ' . (is_string($res) ? $res : 'OK'));
-        } elseif ($channel === 'email') {
-            if (empty($target)) api_out(false, 'Masukkan alamat Email tujuan tes.', null, 400);
-            if (class_exists('Message') && method_exists('Message', 'sendEmail')) {
-                Message::sendEmail($target, 'PHPNuxBill Test Email', 'PHPNuxBill Test Email Body');
-            } else {
-                @mail($target, 'PHPNuxBill Test Email', 'PHPNuxBill Test Email Body');
+            if (empty($target)) {
+                api_out(false, 'Masukkan nomor WhatsApp tujuan tes terlebih dahulu.', null, 400);
             }
-            api_out(true, 'Test Email has been sent to ' . $target);
+            if (empty($config['wa_url'])) {
+                api_out(false, 'WhatsApp Gateway URL (wa_url) belum disimpan di Pengaturan Umum.', null, 400);
+            }
+            $fmt_target = (class_exists('Lang') && method_exists('Lang', 'phoneFormat'))
+                ? Lang::phoneFormat($target)
+                : $target;
+            $test_msg = "*{$comp}*\nPHPNuxBill Test WhatsApp berhasil terhubung!";
+            $res = (class_exists('Message') && method_exists('Message', 'sendWhatsapp'))
+                ? Message::sendWhatsapp($fmt_target, $test_msg)
+                : notify_whatsapp_customer($fmt_target, $test_msg);
+            api_out(true, 'Tes WhatsApp dikirim ke ' . $fmt_target . '. Respons Server: ' . (is_string($res) && $res !== '' ? $res : 'OK'));
+        } elseif ($channel === 'sms') {
+            if (empty($target)) {
+                api_out(false, 'Masukkan nomor HP tujuan tes SMS terlebih dahulu.', null, 400);
+            }
+            if (empty($config['sms_url'])) {
+                api_out(false, 'SMS Gateway URL (sms_url) belum disimpan di Pengaturan Umum.', null, 400);
+            }
+            $fmt_target = (class_exists('Lang') && method_exists('Lang', 'phoneFormat'))
+                ? Lang::phoneFormat($target)
+                : $target;
+            $test_msg = "{$comp} - PHPNuxBill Test SMS";
+            $res = (class_exists('Message') && method_exists('Message', 'sendSMS'))
+                ? Message::sendSMS($fmt_target, $test_msg)
+                : notify_sms_customer($fmt_target, $test_msg);
+            api_out(true, 'Tes SMS dikirim ke ' . $fmt_target . '. Respons Server: ' . (is_string($res) && $res !== '' ? $res : 'OK'));
+        } elseif ($channel === 'email') {
+            if (empty($target)) {
+                api_out(false, 'Masukkan alamat Email tujuan tes terlebih dahulu.', null, 400);
+            }
+            $subj = $comp . ' - PHPNuxBill Test Email';
+            $body = "Halo,\n\nIni adalah pesan uji coba SMTP / Email dari sistem " . $comp . ".";
+            if (class_exists('Message') && method_exists('Message', 'sendEmail')) {
+                Message::sendEmail($target, $subj, $body);
+            } else {
+                @mail($target, $subj, $body);
+            }
+            api_out(true, 'Tes Email berhasil dikirim ke ' . $target);
         } elseif ($channel === 'tg') {
+            if (empty($config['telegram_bot']) || empty($config['telegram_target_id'])) {
+                api_out(false, 'Telegram Bot Token atau Chat ID belum disimpan di Pengaturan Umum.', null, 400);
+            }
+            $test_msg = "[{$comp}] PHPNuxBill Test Telegram berhasil terhubung!";
             $res = (class_exists('Message') && method_exists('Message', 'sendTelegram'))
-                ? Message::sendTelegram('PHPNuxBill Test Telegram')
-                : 'Message::sendTelegram tidak tersedia';
-            api_out(true, 'Test Telegram has been sent. Result: ' . (is_string($res) ? $res : 'OK'));
+                ? Message::sendTelegram($test_msg)
+                : notify_telegram_admin($test_msg);
+            api_out(true, 'Tes Telegram berhasil dikirim ke Bot Admin. Respons: ' . (is_string($res) && $res !== '' ? $res : 'OK'));
         }
         api_out(false, 'Channel tes tidak dikenal.', null, 400);
         break;
 
     case 'admin_notifications_get':
-        global $UPLOAD_PATH;
         require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
-        $up_dir = !empty($UPLOAD_PATH) ? $UPLOAD_PATH : 'system/uploads';
-        $json_file = $up_dir . DIRECTORY_SEPARATOR . 'notifications.json';
-        $def_file  = $up_dir . DIRECTORY_SEPARATOR . 'notifications.default.json';
+        $root_dir  = !empty($phpnux_root) ? $phpnux_root : dirname(__DIR__, 3);
+        $up_dir    = !empty($UPLOAD_PATH) ? $UPLOAD_PATH : 'system/uploads';
+        $abs_up    = $root_dir . DIRECTORY_SEPARATOR . ltrim($up_dir, '/\\');
+        $json_file = $abs_up . DIRECTORY_SEPARATOR . 'notifications.json';
+        $def_file  = $abs_up . DIRECTORY_SEPARATOR . 'notifications.default.json';
 
         $curr_data = [];
         $def_data  = [];
         if (file_exists($def_file)) {
-            $def_data = json_decode(file_get_contents($def_file), true) ?: [];
+            $def_data = json_decode((string)file_get_contents($def_file), true) ?: [];
         }
         if (file_exists($json_file)) {
-            $curr_data = json_decode(file_get_contents($json_file), true) ?: $def_data;
+            $curr_data = json_decode((string)file_get_contents($json_file), true) ?: $def_data;
         } else {
             $curr_data = $def_data;
         }
@@ -116,17 +148,18 @@ switch ($action) {
         break;
 
     case 'admin_notifications_save':
-        global $UPLOAD_PATH;
         $admin = require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
-        $up_dir = !empty($UPLOAD_PATH) ? $UPLOAD_PATH : 'system/uploads';
-        $json_file = $up_dir . DIRECTORY_SEPARATOR . 'notifications.json';
-        $def_file  = $up_dir . DIRECTORY_SEPARATOR . 'notifications.default.json';
+        $root_dir  = !empty($phpnux_root) ? $phpnux_root : dirname(__DIR__, 3);
+        $up_dir    = !empty($UPLOAD_PATH) ? $UPLOAD_PATH : 'system/uploads';
+        $abs_up    = $root_dir . DIRECTORY_SEPARATOR . ltrim($up_dir, '/\\');
+        $json_file = $abs_up . DIRECTORY_SEPARATOR . 'notifications.json';
+        $def_file  = $abs_up . DIRECTORY_SEPARATOR . 'notifications.default.json';
 
         $existing = [];
         if (file_exists($json_file)) {
-            $existing = json_decode(file_get_contents($json_file), true) ?: [];
+            $existing = json_decode((string)file_get_contents($json_file), true) ?: [];
         } elseif (file_exists($def_file)) {
-            $existing = json_decode(file_get_contents($def_file), true) ?: [];
+            $existing = json_decode((string)file_get_contents($def_file), true) ?: [];
         }
 
         $payload = $_POST['notifications'] ?? $_POST;
@@ -137,7 +170,9 @@ switch ($action) {
                 $existing[$k] = (string)$v;
             }
         }
-        @file_put_contents($json_file, json_encode($existing, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+        if (@file_put_contents($json_file, json_encode($existing, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)) === false) {
+            api_out(false, 'Gagal menyimpan notifications.json. Pastikan folder system/uploads memiliki izin tulis (writable).', null, 500);
+        }
         write_admin_log($admin, 'Memperbarui template notifications.json');
         api_out(true, class_exists('Lang') ? Lang::T('Settings Saved Successfully') : 'Template notifikasi berhasil disimpan.');
         break;
@@ -179,10 +214,11 @@ switch ($action) {
         break;
 
     case 'admin_db_backup':
-        global $UPLOAD_PATH;
         $admin = require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
-        $up_dir = !empty($UPLOAD_PATH) ? $UPLOAD_PATH : 'system/uploads';
-        if (!is_dir($up_dir)) @mkdir($up_dir, 0755, true);
+        $root_dir = !empty($phpnux_root) ? $phpnux_root : dirname(__DIR__, 3);
+        $up_dir   = !empty($UPLOAD_PATH) ? $UPLOAD_PATH : 'system/uploads';
+        $abs_up   = $root_dir . DIRECTORY_SEPARATOR . ltrim($up_dir, '/\\');
+        if (!is_dir($abs_up)) @mkdir($abs_up, 0755, true);
 
         $dump = [];
         try {
@@ -199,7 +235,7 @@ switch ($action) {
         }
 
         $filename = 'phpnuxbill_backup_' . date('Y-m-d_His') . '.json';
-        $filepath = rtrim($up_dir, '/\\') . DIRECTORY_SEPARATOR . $filename;
+        $filepath = rtrim($abs_up, '/\\') . DIRECTORY_SEPARATOR . $filename;
         $written  = @file_put_contents($filepath, json_encode($dump, JSON_UNESCAPED_UNICODE));
 
         write_admin_log($admin, 'Membuat backup database JSON: ' . $filename);
@@ -324,13 +360,14 @@ switch ($action) {
         $u->save();
 
         if (!$is_edit && $phone !== '' && ($send_notif === 'wa' || $send_notif === 'sms')) {
-            $notif_msg = (class_exists('Lang') ? Lang::T('Hello, Your account has been created successfully.') : 'Halo, Akun staf Anda telah dibuat.')
-                . "\nUsername: $uname\nPassword: $pass\n\n" . ($config['CompanyName'] ?? 'Arneta.ID');
+            $comp_title = $config['CompanyName'] ?? 'PHPNuxBill';
+            $notif_msg  = (class_exists('Lang') ? Lang::T('Hello, Your account has been created successfully.') : 'Halo, Akun staf Anda telah dibuat.')
+                . "\nUsername: $uname\nPassword: $pass\n\n" . $comp_title;
+            $fmt_phone  = (class_exists('Lang') && method_exists('Lang', 'phoneFormat')) ? Lang::phoneFormat($phone) : $phone;
             if ($send_notif === 'wa') {
-                $fmt_phone = (class_exists('Lang') && method_exists('Lang', 'phoneFormat')) ? Lang::phoneFormat($phone) : $phone;
                 notify_whatsapp_customer($fmt_phone, $notif_msg);
             } else {
-                notify_sms_customer($phone, $notif_msg);
+                notify_sms_customer($fmt_phone, $notif_msg);
             }
         }
 
@@ -396,9 +433,11 @@ switch ($action) {
     case 'admin_system_tools':
         $admin = require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
         $tool = _req('tool') ?: 'clear_cache';
+        $root_dir = !empty($phpnux_root) ? $phpnux_root : dirname(__DIR__, 3);
+
         if ($tool === 'clear_cache') {
             $del = 0;
-            foreach ([$phpnux_root . '/ui/compiled/*', $phpnux_root . '/system/cache/*'] as $pat) {
+            foreach ([$root_dir . '/ui/compiled/*', $root_dir . '/system/cache/*'] as $pat) {
                 foreach (glob($pat) ?: [] as $f) {
                     if (is_file($f) && !in_array(basename($f), ['index.html', '.htaccess'])) {
                         @unlink($f);
@@ -408,11 +447,30 @@ switch ($action) {
             }
             api_out(true, $del . ' file cache sistem berhasil dibersihkan.');
         }
+
         if ($tool === 'run_cron') {
             $cnt = 0;
-            $active = ORM::for_table('tbl_user_recharges')->where('status', 'on')->where_lte('expiration', date('Y-m-d'))->find_many();
+            $active = ORM::for_table('tbl_user_recharges')
+                ->where('status', 'on')
+                ->where_lte('expiration', date('Y-m-d'))
+                ->find_many();
+
             foreach ($active as $ur) {
                 if (time() >= strtotime($ur['expiration'] . ' ' . ($ur['time'] ?: '23:59:59'))) {
+                    $c = ORM::for_table('tbl_customers')->find_one($ur['customer_id']);
+                    $p = ORM::for_table('tbl_plans')->find_one($ur['plan_id']);
+                    if ($c && $p && class_exists('Package') && method_exists('Package', 'getDevice')) {
+                        $dvc = Package::getDevice($p);
+                        if (($_app_stage ?? '') !== 'demo' && file_exists($dvc)) {
+                            require_once $dvc;
+                            $cls = $p['device'];
+                            if (class_exists($cls)) {
+                                try {
+                                    (new $cls())->remove_customer($c, $p);
+                                } catch (Exception $e) {}
+                            }
+                        }
+                    }
                     $ur->status = 'off';
                     $ur->save();
                     $cnt++;
