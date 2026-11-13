@@ -2,9 +2,11 @@
 /**
  * PHPNuxBill Mobile API Plugin - GenieACS TR-069 Pro Module (Admin & Customer)
  * Path: system/plugin/mobile_api_modules/plugin_genieacs.php
- * Supports HTTP/HTTPS, Multi-Host, Optical Diagnostics, WAN/WLAN TR-098 & TR-181,
- * Connected Hosts (Active WiFi/LAN Clients), Tags, Raw JSON, and Customer Self-Service Portal.
+ * Supports HTTP/HTTPS, Multi-Host, Optical ONT & Standard Wireless Routers (HTB/Ethernet),
+ * WAN/WLAN TR-098 & TR-181, Connected Hosts, Tags, Raw JSON, and Customer Self-Service Portal.
  */
+
+global $config, $_c, $admin, $user, $ui;
 
 if (!class_exists('GenieACSClient')) {
     class GenieACSClient
@@ -41,16 +43,11 @@ if (!class_exists('GenieACSClient')) {
 
             $rawHost = rtrim($rawHost, '/');
 
-            // Pisahkan path jika host menggunakan subfolder reverse proxy
             $hostParts = explode('/', $rawHost, 2);
             $hostOnly  = $hostParts[0];
             $subPath   = isset($hostParts[1]) ? '/' . $hostParts[1] : '';
 
-            // Cek apakah port sudah tertulis langsung di dalam string host (misal 192.168.1.10:7557)
-            $explicitPortInHost = false;
-            if (strpos($hostOnly, ':') !== false) {
-                $explicitPortInHost = true;
-            }
+            $explicitPortInHost = (strpos($hostOnly, ':') !== false);
 
             if ($protocol === 'https' || $protocol === 'http') {
                 $scheme = $protocol;
@@ -66,7 +63,6 @@ if (!class_exists('GenieACSClient')) {
                 return "{$scheme}://{$hostOnly}{$subPath}";
             }
 
-            // Jangan tambahkan :port jika menggunakan port standar HTTP (80) / HTTPS (443) atau port <= 0
             if ($port <= 0 || ($scheme === 'https' && $port === 443) || ($scheme === 'http' && $port === 80)) {
                 return "{$scheme}://{$hostOnly}{$subPath}";
             }
@@ -162,8 +158,7 @@ if (!class_exists('GenieACSClient')) {
 
         public function testConnection()
         {
-            $res = $this->request('/devices/?limit=1&projection=_id', 'GET', null, 10);
-            return $res;
+            return $this->request('/devices/?limit=1&projection=_id', 'GET', null, 10);
         }
 
         public function getDevices($query = [], $limit = 100, $skip = 0, $projection = [])
@@ -210,25 +205,42 @@ if (!class_exists('GenieACSClient')) {
             return $this->request($endpoint, 'POST', ['name' => 'factoryReset']);
         }
 
-        public function summonDevice($deviceId, $refreshObject = false)
+        /**
+         * Summon & Refresh Parameter Perangkat:
+         * Menarik cabang DeviceInfo, WANDevice, dan LANDevice agar router biasa (seperti TOTOLINK, TP-Link, Tenda)
+         * di jaringan HTB langsung memperbarui Uptime, WAN IP, SSID, dan Daftar Perangkat Terhubung.
+         */
+        public function summonDevice($deviceId, $fullRefresh = false)
         {
             $encodedId = rawurlencode($deviceId);
-            $endpoint  = "/devices/{$encodedId}/tasks?timeout=3000&connection_request";
-            if ($refreshObject) {
-                return $this->request($endpoint, 'POST', [
-                    'name'       => 'refreshObject',
-                    'objectName' => ''
-                ]);
+            if ($fullRefresh) {
+                return $this->request(
+                    "/devices/{$encodedId}/tasks?timeout=5000&connection_request",
+                    'POST',
+                    ['name' => 'refreshObject', 'objectName' => '']
+                );
             }
-            $res = $this->request($endpoint, 'POST', null);
-            if (empty($res['success'])) {
-                // Fallback jika proxy menolak POST kosong
-                return $this->request($endpoint, 'POST', [
+
+            // Antrekan refresh pada cabang utama tanpa memblokir, lalu picu connection_request pada task terakhir
+            $branches = [
+                'InternetGatewayDevice.DeviceInfo',
+                'InternetGatewayDevice.WANDevice.1',
+                'InternetGatewayDevice.LANDevice.1'
+            ];
+            $lastRes = null;
+            foreach ($branches as $idx => $branch) {
+                $isLast   = ($idx === count($branches) - 1);
+                $endpoint = "/devices/{$encodedId}/tasks" . ($isLast ? '?timeout=4000&connection_request' : '');
+                $lastRes  = $this->request($endpoint, 'POST', [
                     'name'       => 'refreshObject',
-                    'objectName' => 'InternetGatewayDevice.DeviceInfo'
-                ]);
+                    'objectName' => $branch
+                ], 12);
             }
-            return $res;
+
+            if (!empty($lastRes['success'])) {
+                return $lastRes;
+            }
+            return $this->request("/devices/{$encodedId}/tasks?timeout=3000&connection_request", 'POST', null, 10);
         }
 
         public function setParameterValues($deviceId, $parameters, $timeout = 5000)
@@ -291,11 +303,13 @@ if (!function_exists('genieacs_default_projections')) {
             'InternetGatewayDevice.WANDevice.1.X_FH_GponInterfaceConfig',
             'InternetGatewayDevice.WANDevice.1.WANConnectionDevice',
             'InternetGatewayDevice.LANDevice.1.WLANConfiguration',
+            'InternetGatewayDevice.LANDevice.1.Hosts',
             'Device.DeviceInfo',
             'Device.ManagementServer.ConnectionRequestURL',
             'Device.Optical.Interface.1',
             'Device.IP.Interface.1.IPv4Address.1.IPAddress',
-            'Device.WiFi'
+            'Device.WiFi',
+            'Device.Hosts'
         ];
     }
 }
@@ -383,7 +397,7 @@ if (!function_exists('genieacs_load_config')) {
 if (!function_exists('genieacs_format_uptime')) {
     function genieacs_format_uptime($seconds)
     {
-        if (!$seconds || !is_numeric($seconds)) return '-';
+        if (!$seconds || !is_numeric($seconds) || (int)$seconds <= 0) return '-';
         $s = (int)$seconds;
         $days = floor($s / 86400);
         $s %= 86400;
@@ -420,7 +434,7 @@ if (!function_exists('genieacs_extract_wlan_configs')) {
                 if ($beacon === 'WPA') {
                     $secMode = 'WPAPSK';
                     $secLabel = 'WPA-PSK';
-                } elseif ($beacon === 'WPAand11i' || $beacon === 'WPA/WPA2') {
+                } elseif ($beacon === 'WPAand11i' || $beacon === 'WPA/WPA2' || $beacon === '11iandWPA') {
                     $secMode = 'WPA2PSKWPAPSK';
                     $secLabel = 'WPA/WPA2-PSK';
                 } elseif ($beacon === 'Basic' || $beacon === 'None') {
@@ -437,6 +451,20 @@ if (!function_exists('genieacs_extract_wlan_configs')) {
                 $enableVal = $wlan['Enable']['_value'] ?? true;
                 $isEnabled = ($enableVal === true || $enableVal === 1 || $enableVal === '1' || $enableVal === 'true');
 
+                // Hitung connected_devices dari parameter angka ATAU jumlah objek di AssociatedDevice
+                $assocCountParam = (int)($wlan['AssociatedDeviceNumberOfEntries']['_value']
+                    ?? $wlan['TotalAssociations']['_value']
+                    ?? $wlan['X_CT-COM_AssociatedDeviceNumberOfEntries']['_value']
+                    ?? 0);
+                $assocObjCount = 0;
+                if (!empty($wlan['AssociatedDevice']) && is_array($wlan['AssociatedDevice'])) {
+                    foreach ($wlan['AssociatedDevice'] as $k => $v) {
+                        if (strpos((string)$k, '_') !== 0 && is_array($v)) {
+                            $assocObjCount++;
+                        }
+                    }
+                }
+
                 $configs[] = [
                     'index'             => $i,
                     'ssid'              => (string)($ssid ?? ''),
@@ -450,10 +478,7 @@ if (!function_exists('genieacs_extract_wlan_configs')) {
                     'mac'               => (string)($wlan['BSSID']['_value'] ?? '-'),
                     'standard'          => $standard !== '' ? $standard : $band,
                     'max_bitrate'       => (string)($wlan['MaxBitRate']['_value'] ?? '-'),
-                    'connected_devices' => (int)($wlan['AssociatedDeviceNumberOfEntries']['_value']
-                        ?? $wlan['TotalAssociations']['_value']
-                        ?? $wlan['X_CT-COM_AssociatedDeviceNumberOfEntries']['_value']
-                        ?? 0),
+                    'connected_devices' => max($assocCountParam, $assocObjCount),
                     'source'            => 'tr098'
                 ];
             }
@@ -566,7 +591,7 @@ if (!function_exists('genieacs_extract_connected_hosts')) {
         $hostsList = [];
         $seenMacs  = [];
 
-        // 1. TR-098 LANDevice Hosts
+        // 1. TR-098 LANDevice.1.Hosts.Host (Didukung oleh ONT & Router seperti TOTOLINK, TP-Link, Tenda)
         $tr098Hosts = $device['InternetGatewayDevice']['LANDevice']['1']['Hosts']['Host'] ?? [];
         if (is_array($tr098Hosts)) {
             foreach ($tr098Hosts as $idx => $h) {
@@ -596,7 +621,31 @@ if (!function_exists('genieacs_extract_connected_hosts')) {
             }
         }
 
-        // 2. TR-181 Device.Hosts.Host
+        // 2. TR-098 WLANConfiguration.i.AssociatedDevice (Fallback untuk router yang hanya melaporkan klien di bawah cabang WiFi)
+        for ($i = 1; $i <= 8; $i++) {
+            $assocMap = $device['InternetGatewayDevice']['LANDevice']['1']['WLANConfiguration'][$i]['AssociatedDevice'] ?? [];
+            if (!is_array($assocMap)) continue;
+            foreach ($assocMap as $idx => $ad) {
+                if (!is_array($ad) || strpos((string)$idx, '_') === 0) continue;
+                $mac = strtoupper((string)($ad['AssociatedDeviceMACAddress']['_value'] ?? ''));
+                $ip  = (string)($ad['AssociatedDeviceIPAddress']['_value'] ?? '');
+                if ($mac !== '' && isset($seenMacs[$mac])) continue;
+                if ($mac === '' && $ip === '') continue;
+                if ($mac !== '') $seenMacs[$mac] = true;
+
+                $hostsList[] = [
+                    'index'          => (int)$idx,
+                    'hostname'       => 'WiFi-Client-' . substr(str_replace(':', '', $mac ?: $ip), -4),
+                    'ip_address'     => $ip ?: '-',
+                    'mac_address'    => $mac ?: '-',
+                    'interface_type' => "WiFi #{$i}",
+                    'active'         => true,
+                    'signal'         => (string)($ad['X_HW_RSSI']['_value'] ?? ($ad['SignalStrength']['_value'] ?? ''))
+                ];
+            }
+        }
+
+        // 3. TR-181 Device.Hosts.Host
         $tr181Hosts = $device['Device']['Hosts']['Host'] ?? [];
         if (is_array($tr181Hosts)) {
             foreach ($tr181Hosts as $idx => $h) {
@@ -629,8 +678,10 @@ if (!function_exists('genieacs_extract_connected_hosts')) {
 if (!function_exists('genieacs_extract_device_info')) {
     function genieacs_extract_device_info($d)
     {
-        $pppoe  = 'N/A';
-        $wan_ip = 'N/A';
+        $pppoe        = 'N/A';
+        $wan_ip       = 'N/A';
+        $wan_uptime   = null;
+
         for ($i = 1; $i <= 8; $i++) {
             $wanConn = $d['InternetGatewayDevice']['WANDevice']['1']['WANConnectionDevice'][$i] ?? null;
             if (!$wanConn) continue;
@@ -643,6 +694,12 @@ if (!function_exists('genieacs_extract_device_info')) {
             $ip_c   = $wanConn['WANIPConnection']['1']['ExternalIPAddress']['_value'] ?? null;
             if ($ppp_ip && $ppp_ip !== '0.0.0.0' && $wan_ip === 'N/A') $wan_ip = (string)$ppp_ip;
             if ($ip_c && $ip_c !== '0.0.0.0' && $wan_ip === 'N/A') $wan_ip = (string)$ip_c;
+
+            if ($wan_uptime === null) {
+                $wan_uptime = $wanConn['WANPPPConnection']['1']['Uptime']['_value']
+                    ?? $wanConn['WANIPConnection']['1']['Uptime']['_value']
+                    ?? null;
+            }
         }
         if ($wan_ip === 'N/A') {
             $tr181_ip = $d['Device']['IP']['Interface']['1']['IPv4Address']['1']['IPAddress']['_value'] ?? null;
@@ -657,7 +714,7 @@ if (!function_exists('genieacs_extract_device_info')) {
             $tr069ip = $m[1];
         }
 
-        // Ekstraksi Redaman Optik (RX Power) & Klasifikasi Status Warna sesuai genieacs_device.tpl
+        // Ekstraksi Redaman Optik (RX Power)
         $rxPowerRaw = null;
         $rxPowerVal = $d['VirtualParameters']['RXPower']['_value']
             ?? $d['InternetGatewayDevice']['WANDevice']['1']['X_CT-COM_EponInterfaceConfig']['RXPower']['_value']
@@ -704,7 +761,7 @@ if (!function_exists('genieacs_extract_device_info')) {
             $txPower = number_format($tx, 2) . ' dBm';
         }
 
-        // Ekstraksi Suhu Perangkat & Klasifikasi Status Warna sesuai genieacs_device.tpl
+        // Ekstraksi Suhu Perangkat
         $tempRaw = null;
         $tempVal = $d['VirtualParameters']['gettemp']['_value']
             ?? $d['InternetGatewayDevice']['WANDevice']['1']['X_CT-COM_EponInterfaceConfig']['TransceiverTemperature']['_value']
@@ -755,16 +812,22 @@ if (!function_exists('genieacs_extract_device_info')) {
                     $fullname    = (string)$cust['fullname'];
                     $customer_id = (int)$cust['id'];
                     $cust_phone  = (string)($cust['phonenumber'] ?? '');
-                    if ($pppoe === 'N/A') $pppoe = (string)$cust['username'];
+                    if ($pppoe === 'N/A') $pppoe = (string)($cust['pppoe_username'] ?: $cust['username']);
                 }
             }
         }
 
-        $connectedDevices = 0;
+        // Hitung jumlah perangkat terhubung dari WLAN, HostNumberOfEntries, maupun tabel Hosts (kompatibel penuh dengan TOTOLINK/HTB)
+        $wlanConnected = 0;
         $wlanCfgs = genieacs_extract_wlan_configs($d);
         foreach ($wlanCfgs as $wc) {
-            $connectedDevices += (int)($wc['connected_devices'] ?? 0);
+            $wlanConnected += (int)($wc['connected_devices'] ?? 0);
         }
+        $lanHostNumEntries = (int)($d['InternetGatewayDevice']['LANDevice']['1']['Hosts']['HostNumberOfEntries']['_value']
+            ?? $d['Device']['Hosts']['HostNumberOfEntries']['_value']
+            ?? 0);
+        $extractedHostsCount = count(genieacs_extract_connected_hosts($d));
+        $connectedDevices    = max($wlanConnected, $lanHostNumEntries, $extractedHostsCount);
 
         $lastInform   = (string)($d['_lastInform'] ?? '');
         $lastInformTs = $lastInform !== '' ? (int)strtotime($lastInform) : 0;
@@ -772,9 +835,11 @@ if (!function_exists('genieacs_extract_device_info')) {
 
         $uptimeRaw = $d['InternetGatewayDevice']['DeviceInfo']['UpTime']['_value']
             ?? $d['Device']['DeviceInfo']['UpTime']['_value']
-            ?? null;
+            ?? $d['VirtualParameters']['UpTime']['_value']
+            ?? $wan_uptime;
 
         $productClass = (string)($d['_deviceId']['_ProductClass'] ?? '-');
+        $isOptical    = ($rxPowerRaw !== null);
 
         return [
             'id'                 => (string)($d['_id'] ?? ''),
@@ -794,6 +859,7 @@ if (!function_exists('genieacs_extract_device_info')) {
             'wan_ip'             => $wan_ip,
             'tr069_ip'           => $tr069ip,
             'connection_url'     => (string)($connUrl ?? '-'),
+            'is_optical'         => $isOptical,
             'temperature'        => $temp,
             'temperature_raw'    => $tempRaw,
             'temperature_status' => $tempStatus,
@@ -1082,14 +1148,14 @@ switch ($action) {
         $client     = genieacs_load_config($hostId);
 
         $stats = [
-            'total'          => 0,
-            'online'         => 0,
-            'offline'        => 0,
-            'bad_rx_count'   => 0,
-            'high_temp_count'=> 0
+            'total'           => 0,
+            'online'          => 0,
+            'offline'         => 0,
+            'bad_rx_count'    => 0,
+            'high_temp_count' => 0
         ];
-        $recentDevices  = [];
-        $offlineDevices = [];
+        $recentDevices   = [];
+        $offlineDevices  = [];
         $connectionError = '';
 
         if ($client) {
@@ -1214,8 +1280,8 @@ switch ($action) {
             return (($a['last_inform_ts'] ?? 0) <=> ($b['last_inform_ts'] ?? 0)) * $mult;
         });
 
-        $total   = count($allExtracted);
-        $paged   = array_slice($allExtracted, $skip, $limit);
+        $total = count($allExtracted);
+        $paged = array_slice($allExtracted, $skip, $limit);
 
         api_out(true, 'Daftar perangkat GenieACS dimuat', [
             'hosts'       => $hosts,
@@ -1253,17 +1319,16 @@ switch ($action) {
         $wlan       = genieacs_extract_wlan_configs($dev);
         $lanHosts   = genieacs_extract_connected_hosts($dev);
 
-        $tasksRes   = $client->getDeviceTasks($deviceId);
+        $tasksRes     = $client->getDeviceTasks($deviceId);
         $pendingTasks = (!empty($tasksRes['success']) && is_array($tasksRes['data'])) ? $tasksRes['data'] : [];
 
-        // Ringkasan JSON perangkat (agar Raw JSON tetap ringan namun informatif sesuai genieacs_device.tpl)
         $rawSummary = [
-            '_id'          => $dev['_id'] ?? '',
-            '_deviceId'    => $dev['_deviceId'] ?? [],
-            '_lastInform'  => $dev['_lastInform'] ?? '',
-            '_tags'        => $dev['_tags'] ?? [],
+            '_id'               => $dev['_id'] ?? '',
+            '_deviceId'         => $dev['_deviceId'] ?? [],
+            '_lastInform'       => $dev['_lastInform'] ?? '',
+            '_tags'             => $dev['_tags'] ?? [],
             'VirtualParameters' => $dev['VirtualParameters'] ?? [],
-            'DeviceInfo'   => $dev['InternetGatewayDevice']['DeviceInfo'] ?? ($dev['Device']['DeviceInfo'] ?? [])
+            'DeviceInfo'        => $dev['InternetGatewayDevice']['DeviceInfo'] ?? ($dev['Device']['DeviceInfo'] ?? [])
         ];
 
         api_out(true, 'Detail perangkat GenieACS dimuat', [
@@ -1303,7 +1368,7 @@ switch ($action) {
         if ($sub === 'summon' || $sub === 'refresh') {
             $res = $client->summonDevice($deviceId, ($sub === 'refresh'));
             if (!empty($res['success'])) {
-                api_out(true, 'Perintah Summon / Refresh berhasil dikirim ke perangkat ' . $deviceId . '.');
+                api_out(true, 'Perintah Summon & Sinkronisasi Parameter (DeviceInfo, WAN, WiFi & Host) berhasil dikirim ke ' . $deviceId . '.');
             }
             api_out(false, 'Gagal melakukan Summon: ' . ($res['error'] ?? 'Unknown error'), null, 500);
         }
@@ -1381,7 +1446,6 @@ switch ($action) {
         $client = genieacs_load_config($hostId);
         if (!$client) api_out(false, 'Server GenieACS belum dikonfigurasi.', null, 400);
 
-        // Jika Admin memilih pelanggan PHPNuxBill untuk di-push akun PPPoE-nya
         if ($customerId > 0 && $username === '') {
             $cust = ORM::for_table('tbl_customers')->find_one($customerId);
             if ($cust) {
@@ -1464,7 +1528,6 @@ switch ($action) {
 
     // =========================================================================
     // 7. ENDPOINT KHUSUS APK PELANGGAN (MY DEVICE / PORTAL MANDIRI PELANGGAN)
-    //    Kompatibel penuh dengan genieacs_customer.tpl & genieacs_customer_wlan.tpl
     // =========================================================================
     case 'customer_genieacs_dashboard':
     case 'genieacs_customer_dashboard':
@@ -1532,7 +1595,6 @@ switch ($action) {
         }
         $deviceId = $device['_id'];
 
-        // Deteksi otomatis apakah perangkat pelanggan menggunakan TR-181 atau TR-098
         $existingWlans = genieacs_extract_wlan_configs($device);
         foreach ($existingWlans as $ew) {
             if ((int)$ew['index'] === $wlanIndex && !empty($ew['source'])) {
@@ -1586,7 +1648,7 @@ switch ($action) {
             api_out(false, 'Perangkat modem Anda tidak ditemukan.', null, 404);
         }
 
-        $res = $client->summonDevice($device['_id'], true);
+        $res = $client->summonDevice($device['_id'], false);
         if (!empty($res['success'])) {
             api_out(true, 'Sinkronisasi data modem berhasil dikirim.');
         }
