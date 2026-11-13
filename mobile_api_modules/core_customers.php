@@ -4,6 +4,8 @@
  * Path: system/plugin/mobile_api_modules/core_customers.php
  */
 
+global $config, $_c, $admin, $ui, $UPLOAD_PATH, $DEVICE_PATH, $zero, $_app_stage, $isChangePlan;
+
 switch ($action) {
     case 'admin_customers':
         $admin = require_admin_session($api_secret);
@@ -14,7 +16,10 @@ switch ($action) {
         $q = ORM::for_table('tbl_customers');
         if ($search !== '') {
             $like = '%' . $search . '%';
-            $q->where_raw('(username LIKE ? OR fullname LIKE ? OR phonenumber LIKE ? OR email LIKE ? OR pppoe_username LIKE ? OR address LIKE ? OR city LIKE ?)', [$like, $like, $like, $like, $like, $like, $like]);
+            $q->where_raw(
+                '(username LIKE ? OR fullname LIKE ? OR phonenumber LIKE ? OR email LIKE ? OR pppoe_username LIKE ? OR address LIKE ? OR city LIKE ?)',
+                [$like, $like, $like, $like, $like, $like, $like]
+            );
         }
         if ($service_type !== '' && strtolower($service_type) !== 'all') {
             $q->where('service_type', $service_type);
@@ -46,7 +51,7 @@ switch ($action) {
                 'phonenumber'    => $row['phonenumber'] ?: '',
                 'email'          => $row['email'] ?: '',
                 'address'        => $row['address'] ?: '',
-                'city'           => $row['city'] ?? '',
+                'city'           => $row['city'] ?: '',
                 'balance'        => (float)$row['balance'],
                 'service_type'   => $row['service_type'] ?: 'Hotspot',
                 'account_type'   => $row['account_type'] ?? 'Personal',
@@ -76,12 +81,13 @@ switch ($action) {
         break;
 
     case 'admin_customer_save':
-        global $zero, $_app_stage;
         $admin = require_admin_session($api_secret);
         $id = (int)_post('id');
 
         $raw_username   = trim(_post('username'));
-        $username       = function_exists('alphanumeric') ? alphanumeric($raw_username, ":+_.@-") : $raw_username;
+        $username       = (class_exists('Text') && method_exists('Text', 'alphanumeric'))
+            ? Text::alphanumeric($raw_username, ":+_.@-")
+            : (function_exists('alphanumeric') ? alphanumeric($raw_username, ":+_.@-") : $raw_username);
         $fullname       = trim(_post('fullname'));
         $password       = trim(_post('password'));
         $pppoe_username = trim(_post('pppoe_username'));
@@ -205,7 +211,7 @@ switch ($action) {
 
         $customerId = (int)$cust->id();
 
-        // Jika Edit Pelanggan dan ada paket berstatus ON, sinkronkan perubahan password/PPPoE ke MikroTik (Sesuai accounts.php)
+        // Jika Edit Pelanggan dan ada paket berstatus ON, sinkronkan perubahan password/PPPoE ke MikroTik (Sesuai customers.php)
         if ($id > 0 && $ppln <= 0 && class_exists('Package') && method_exists('Package', 'getDevice')) {
             $active_turs = ORM::for_table('tbl_user_recharges')->where('customer_id', $customerId)->where('status', 'on')->find_many();
             foreach ($active_turs as $tur) {
@@ -242,8 +248,59 @@ switch ($action) {
             }
         }
 
+        // Kirim Welcome Message menggunakan template resmi notifications.json (Sesuai system/controllers/customers.php)
+        $send_welcome = _post('send_welcome_message');
+        if ($send_welcome === true || $send_welcome === 'true' || $send_welcome === '1' || $send_welcome === 1) {
+            $welcomeMessage = get_official_notif_template('welcome_message');
+            if (!empty(trim($welcomeMessage))) {
+                $clean_root_url = defined('APP_URL') ? preg_replace('#/system/?$#i', '', rtrim(APP_URL, '/')) : '';
+                $comp_title     = $config['CompanyName'] ?? 'PHPNuxBill';
+
+                $welcomeMessage = str_replace(
+                    ['[[company]]', '[[company_name]]', '[[name]]', '[[username]]', '[[user_name]]', '[[password]]', '[[user_password]]', '[[url]]'],
+                    [$comp_title, $comp_title, $cust['fullname'], $cust['username'], $cust['username'], $cust['password'], $cust['password'], $clean_root_url . '/?_route=login'],
+                    $welcomeMessage
+                );
+
+                $emailSubject = 'Welcome to ' . $comp_title;
+
+                $enable_wa   = (_post('wa') === true || _post('wa') === 'true' || _post('wa') === '1' || _post('wa') === 1);
+                $enable_sms  = (_post('sms') === true || _post('sms') === 'true' || _post('sms') === '1' || _post('sms') === 1);
+                $enable_mail = (_post('mail') === true || _post('mail') === 'true' || _post('mail') === '1' || _post('mail') === 1);
+
+                if ($enable_wa && !empty($cust['phonenumber'])) {
+                    notify_whatsapp_customer($cust['phonenumber'], $welcomeMessage);
+                }
+                if ($enable_sms && !empty($cust['phonenumber'])) {
+                    notify_sms_customer($cust['phonenumber'], $welcomeMessage);
+                }
+                if ($enable_mail && !empty($cust['email']) && class_exists('Message') && method_exists('Message', 'sendEmail')) {
+                    try {
+                        Message::sendEmail($cust['email'], $emailSubject, $welcomeMessage, $cust['email']);
+                    } catch (Exception $e) {
+                        write_admin_log($admin, 'Gagal mengirim email welcome message: ' . $e->getMessage());
+                    }
+                }
+            }
+        }
+
+        // Aktivasi paket langsung (Quick-Add / Edit + Paket) menggunakan alur resmi Package::rechargeUser
         $recharged_plan_name = '';
         if ($ppln > 0) {
+            $cur_notif = strtolower(trim((string)($config['user_notification_payment'] ?? '')));
+            if ($cur_notif === '' || $cur_notif === 'none') {
+                if (!empty($config['wa_url'])) {
+                    $config['user_notification_payment'] = 'wa';
+                    $_c['user_notification_payment']     = 'wa';
+                } elseif (!empty($config['sms_url'])) {
+                    $config['user_notification_payment'] = 'sms';
+                    $_c['user_notification_payment']     = 'sms';
+                } elseif (!empty($config['smtp_host'])) {
+                    $config['user_notification_payment'] = 'email';
+                    $_c['user_notification_payment']     = 'email';
+                }
+            }
+
             $plan_q = ORM::for_table('tbl_plans');
             if (!in_array($admin['user_type'], ['SuperAdmin', 'Admin'])) {
                 $plan_q->where('enabled', 1);
@@ -251,21 +308,29 @@ switch ($action) {
             $plan = $plan_q->find_one($ppln);
 
             if ($plan) {
-                $gateway = $using;
-                if ($using === 'Recharge Zero' || strtolower($using) === 'zero') {
+                $using_lower = strtolower($using);
+                $gateway     = ucwords($using);
+                if ($using_lower === 'recharge zero' || $using_lower === 'zero') {
                     $zero = 1;
                     $GLOBALS['zero'] = 1;
                     $gateway = 'Recharge Zero';
-                } elseif (strtolower($using) === 'balance') {
+                } elseif ($using_lower === 'balance' || $using_lower === 'recharge balance') {
                     $gateway = 'Recharge Balance';
+                    $using_lower = 'balance';
                 }
 
                 $server = ($plan['is_radius'] == '1') ? 'Radius' : $plan['routers'];
                 $admin_name = $admin['fullname'] ?: $admin['username'];
 
                 if (class_exists('Package') && method_exists('Package', 'rechargeUser')) {
-                    if (@Package::rechargeUser($customerId, $server, $plan['id'], $gateway, $admin_name)) {
+                    if (Package::rechargeUser($customerId, $server, $plan['id'], $gateway, $admin_name)) {
                         $recharged_plan_name = $plan['name_plan'];
+                        if ($using_lower === 'balance') {
+                            $cost_info = calculate_order_cost($customerId, $plan, $config);
+                            if (class_exists('Balance') && method_exists('Balance', 'min')) {
+                                Balance::min($customerId, $cost_info['total_cost']);
+                            }
+                        }
                         if (class_exists('User') && method_exists('User', 'getBills')) {
                             @User::getBills($customerId);
                         }
@@ -274,49 +339,9 @@ switch ($action) {
             }
         }
 
-        $send_welcome = _post('send_welcome_message');
-        if ($send_welcome === true || $send_welcome === 'true' || $send_welcome === '1' || $send_welcome === 1) {
-            $welcomeMessage = '';
-            if (class_exists('Lang') && method_exists('Lang', 'getNotifText')) {
-                $welcomeMessage = @Lang::getNotifText('welcome_message');
-            }
-            if (empty(trim($welcomeMessage))) {
-                $welcomeMessage = "Halo *[[name]]*,\n\nSelamat datang di layanan internet *[[company]]*.\nBerikut informasi akun Anda:\nUsername: *[[username]]*\nPassword: *[[password]]*\nLogin Portal: [[url]]\n\nTerima kasih telah bergabung!";
-            }
-
-            $clean_root_url = preg_replace('#/system/?$#i', '', rtrim(APP_URL, '/'));
-            $comp_title = $config['CompanyName'] ?? 'Arneta.ID';
-
-            $welcomeMessage = str_replace('[[company]]', $comp_title, $welcomeMessage);
-            $welcomeMessage = str_replace('[[name]]', $cust['fullname'], $welcomeMessage);
-            $welcomeMessage = str_replace('[[username]]', $cust['username'], $welcomeMessage);
-            $welcomeMessage = str_replace('[[password]]', $cust['password'], $welcomeMessage);
-            $welcomeMessage = str_replace('[[url]]', $clean_root_url . '/?_route=login', $welcomeMessage);
-
-            $emailSubject = 'Welcome to ' . $comp_title;
-
-            $enable_wa   = (_post('wa') === true || _post('wa') === 'true' || _post('wa') === '1' || _post('wa') === 1);
-            $enable_sms  = (_post('sms') === true || _post('sms') === 'true' || _post('sms') === '1' || _post('sms') === 1);
-            $enable_mail = (_post('mail') === true || _post('mail') === 'true' || _post('mail') === '1' || _post('mail') === 1);
-
-            if ($enable_wa && !empty($cust['phonenumber'])) {
-                notify_whatsapp_customer($cust['phonenumber'], $welcomeMessage);
-            }
-            if ($enable_sms && !empty($cust['phonenumber'])) {
-                notify_sms_customer($cust['phonenumber'], $welcomeMessage);
-            }
-            if ($enable_mail && !empty($cust['email']) && class_exists('Message') && method_exists('Message', 'sendEmail')) {
-                try {
-                    @Message::sendEmail($cust['email'], $emailSubject, $welcomeMessage, $cust['email']);
-                } catch (Exception $e) {
-                    write_admin_log($admin, 'Gagal mengirim email welcome message: ' . $e->getMessage());
-                }
-            }
-        }
-
         unset($zero, $GLOBALS['zero'], $_SESSION['notify'], $_SESSION['ntype']);
 
-        $action_label = ($id > 0 ? 'Mengubah' : 'Menambah (QuickAdd)') . ' pelanggan: ' . $username
+        $action_label = ($id > 0 ? 'Mengubah' : 'Menambah') . ' pelanggan: ' . $username
             . (!empty($recharged_plan_name) ? ' + Paket ' . $recharged_plan_name . ' (' . $using . ')' : '');
         write_admin_log($admin, $action_label);
 
@@ -324,7 +349,8 @@ switch ($action) {
             ? ('Akun ' . $fullname . ' berhasil dibuat' . (!empty($recharged_plan_name) ? ' & paket ' . $recharged_plan_name . ' telah aktif!' : '!'))
             : ('Data pelanggan ' . $fullname . ' berhasil diperbarui.');
 
-        $cust_out = $cust->as_array();
+        $cust_fresh = ORM::for_table('tbl_customers')->find_one($customerId) ?: $cust;
+        $cust_out   = $cust_fresh->as_array();
         if (!empty($recharged_plan_name)) {
             $in_last = ORM::for_table('tbl_transactions')->where('username', $cust['username'])->order_by_desc('id')->find_one();
             if ($in_last) {
@@ -341,6 +367,9 @@ switch ($action) {
         $cust = ORM::for_table('tbl_customers')->find_one($id);
         if (!$cust) api_out(false, 'Pelanggan tidak ditemukan.', null, 404);
         $uname = $cust['username'];
+        if (function_exists('run_hook')) {
+            @run_hook('delete_customer');
+        }
         ORM::for_table('tbl_user_recharges')->where('customer_id', $id)->delete_many();
         try { ORM::for_table('tbl_customers_fields')->where('customer_id', $id)->delete_many(); } catch (Exception $e) {}
         $cust->delete();
