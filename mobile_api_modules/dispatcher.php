@@ -26,13 +26,27 @@ if (is_array($raw_input)) {
     $_REQUEST = array_merge($_REQUEST, $raw_input);
 }
 
-// Muat bootstrap & seluruh fungsi helper bersama terlebih dahulu agar $config dan path resmi siap
+// Muat bootstrap & seluruh fungsi helper bersama
 require_once __DIR__ . '/helpers_common.php';
 
+// Gunakan secret key khusus Mobile API (tanpa tawk.to)
 if (empty($api_secret)) {
-    $api_secret = !empty($config['tawkto'])
-        ? $config['tawkto']
-        : (!empty($config['api_key']) ? $config['api_key'] : 'PHPNuxBill_Mobile_API_Secret_Key');
+    if (!empty($config['mobile_api_secret'])) {
+        $api_secret = $config['mobile_api_secret'];
+    } else {
+        $api_secret = 'PHPNuxBill_Mobile_API_' . md5(__DIR__);
+        try {
+            $sec_row = ORM::for_table('tbl_appconfig')->where('setting', 'mobile_api_secret')->find_one();
+            if (!$sec_row) {
+                $sec_row = ORM::for_table('tbl_appconfig')->create();
+                $sec_row->setting = 'mobile_api_secret';
+                $sec_row->value   = $api_secret;
+                $sec_row->save();
+            }
+            $config['mobile_api_secret'] = $api_secret;
+            $_c['mobile_api_secret']     = $api_secret;
+        } catch (Exception $e) {}
+    }
 }
 
 // Resolusi parameter $action dari system/api.php (?r=plugin/mobile_api/<action> atau &action=<action>)
@@ -53,7 +67,6 @@ if (!empty($_REQUEST['action'])) {
     $action = 'index';
 }
 
-// Pemetaan $action ke file modul terkait
 switch ($action) {
     // 1. Modul Auth, SSO WebView & Dashboard Admin
     case 'auth':
@@ -214,9 +227,17 @@ switch ($action) {
         break;
 
     default:
-        api_out(true, 'PHPNuxBill Mobile REST API Plugin Ready (Connected via system/api.php)', [
-            'version' => '3.0.0',
-            'action'  => $action
+        $comp_name = $config['CompanyName'] ?? 'PHPNuxBill';
+        $curr_code = $config['currency_code'] ?? 'Rp.';
+        api_out(true, 'Terhubung ke ' . $comp_name . ' (PHPNuxBill Mobile API v3.0.0)', [
+            'version'       => '3.0.0',
+            'action'        => $action,
+            'company_name'  => $comp_name,
+            'currency_code' => $curr_code,
+            'company'       => [
+                'name'     => $comp_name,
+                'currency' => $curr_code
+            ]
         ]);
         break;
 }
