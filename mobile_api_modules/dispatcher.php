@@ -5,10 +5,12 @@
  * Dipanggil melalui gerbang resmi system/api.php?r=plugin/mobile_api
  */
 
-global $config, $_c, $admin, $user, $ui, $routes, $_app_stage, $root_path, $DEVICE_PATH, $PAYMENTGATEWAY_PATH, $UPLOAD_PATH, $CACHE_PATH, $PLUGIN_PATH, $isApi, $zero, $isChangePlan, $phpnux_root;
+global $config, $_c, $admin, $user, $ui, $routes, $_app_stage, $root_path, $lan_file, $_L, $DEVICE_PATH, $PAYMENTGATEWAY_PATH, $UPLOAD_PATH, $CACHE_PATH, $PLUGIN_PATH, $isApi, $zero, $isChangePlan, $phpnux_root;
 
 $isApi = true;
-ob_start();
+if (ob_get_level() === 0) {
+    ob_start();
+}
 header('Content-Type: application/json; charset=utf-8');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
@@ -20,16 +22,21 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
 }
 
 // Parse JSON body jika request dikirim dengan Content-Type: application/json
-$raw_input = json_decode(file_get_contents('php://input'), true);
-if (is_array($raw_input)) {
-    $_POST    = array_merge($_POST, $raw_input);
-    $_REQUEST = array_merge($_REQUEST, $raw_input);
+$raw_input = file_get_contents('php://input');
+if (!empty($raw_input)) {
+    $json_input = json_decode($raw_input, true);
+    if (is_array($json_input)) {
+        foreach ($json_input as $k => $v) {
+            $_POST[$k]    = $v;
+            $_REQUEST[$k] = $v;
+        }
+    }
 }
 
 // Muat bootstrap & seluruh fungsi helper bersama
 require_once __DIR__ . '/helpers_common.php';
 
-// Gunakan secret key khusus Mobile API (tanpa tawk.to)
+// Gunakan secret key khusus Mobile API (tanpa ketergantungan pada tawk.to)
 if (empty($api_secret)) {
     if (!empty($config['mobile_api_secret'])) {
         $api_secret = $config['mobile_api_secret'];
@@ -37,20 +44,24 @@ if (empty($api_secret)) {
         $api_secret = 'PHPNuxBill_Mobile_API_' . md5(__DIR__);
         try {
             $sec_row = ORM::for_table('tbl_appconfig')->where('setting', 'mobile_api_secret')->find_one();
-            if (!$sec_row) {
-                $sec_row = ORM::for_table('tbl_appconfig')->create();
-                $sec_row->setting = 'mobile_api_secret';
-                $sec_row->value   = $api_secret;
+            if ($sec_row && !empty($sec_row['value'])) {
+                $api_secret = $sec_row['value'];
+            } else {
+                if (!$sec_row) {
+                    $sec_row = ORM::for_table('tbl_appconfig')->create();
+                    $sec_row->setting = 'mobile_api_secret';
+                }
+                $sec_row->value = $api_secret;
                 $sec_row->save();
             }
-            $config['mobile_api_secret'] = $api_secret;
-            $_c['mobile_api_secret']     = $api_secret;
-        } catch (Exception $e) {}
+            $config['mobile_api_secret']           = $api_secret;
+            $GLOBALS['config']['mobile_api_secret'] = $api_secret;
+        } catch (Throwable $e) {}
     }
 }
 
 // Resolusi parameter $action dari system/api.php (?r=plugin/mobile_api/<action> atau &action=<action>)
-$_raw_r = trim($_GET['r'] ?? $_POST['r'] ?? $_GET['_route'] ?? '');
+$_raw_r   = trim((string)($_GET['r'] ?? $_POST['r'] ?? $_GET['_route'] ?? ''));
 $_r_parts = array_values(array_filter(explode('/', $_raw_r)));
 
 if (!empty($_REQUEST['action'])) {
@@ -67,177 +78,186 @@ if (!empty($_REQUEST['action'])) {
     $action = 'index';
 }
 
-switch ($action) {
-    // 1. Modul Auth, SSO WebView & Dashboard Admin
-    case 'auth':
-    case 'admin_login':
-    case 'customer_login':
-    case 'webview_sso':
-    case 'admin_webview_sso':
-    case 'admin_dashboard':
-    case 'dashboard_extras':
-        require __DIR__ . '/core_auth_dashboard.php';
-        break;
+try {
+    switch ($action) {
+        // 1. Modul Auth, SSO WebView & Dashboard Admin
+        case 'auth':
+        case 'admin_login':
+        case 'customer_login':
+        case 'webview_sso':
+        case 'admin_webview_sso':
+        case 'admin_dashboard':
+        case 'dashboard_extras':
+            require __DIR__ . '/core_auth_dashboard.php';
+            break;
 
-    // 2. Modul Manajemen Pelanggan
-    case 'admin_customers':
-    case 'admin_customer_save':
-    case 'admin_customer_delete':
-    case 'admin_customer_sync':
-        require __DIR__ . '/core_customers.php';
-        break;
+        // 2. Modul Manajemen Pelanggan
+        case 'admin_customers':
+        case 'admin_customer_save':
+        case 'admin_customer_delete':
+        case 'admin_customer_sync':
+            require __DIR__ . '/core_customers.php';
+            break;
 
-    // 3. Modul Layanan Aktif, Recharge, Deposit, Voucher & Resend WA Invoice
-    case 'admin_prepaid_list':
-    case 'admin_prepaid_recharge':
-    case 'admin_prepaid_delete':
-    case 'admin_prepaid_edit':
-    case 'admin_prepaid_extend':
-    case 'admin_deposit':
-    case 'admin_vouchers':
-    case 'admin_voucher_generate':
-    case 'admin_voucher_delete':
-    case 'admin_voucher_refill':
-    case 'admin_resend_invoice_wa':
-        require __DIR__ . '/core_services_vouchers.php';
-        break;
+        // 3. Modul Layanan Aktif, Recharge, Deposit, Voucher & Resend WA Invoice
+        case 'admin_prepaid_list':
+        case 'admin_prepaid_recharge':
+        case 'admin_prepaid_delete':
+        case 'admin_prepaid_edit':
+        case 'admin_prepaid_extend':
+        case 'admin_deposit':
+        case 'admin_vouchers':
+        case 'admin_voucher_generate':
+        case 'admin_voucher_delete':
+        case 'admin_voucher_refill':
+        case 'admin_resend_invoice_wa':
+            require __DIR__ . '/core_services_vouchers.php';
+            break;
 
-    // 4. Modul Paket Internet & Bandwidth
-    case 'admin_plans':
-    case 'admin_plan_save':
-    case 'admin_plan_delete':
-    case 'admin_plan_sync':
-    case 'admin_bandwidths':
-    case 'admin_bandwidth_save':
-    case 'admin_bandwidth_delete':
-        require __DIR__ . '/core_plans_bandwidth.php';
-        break;
+        // 4. Modul Paket Internet & Bandwidth
+        case 'admin_plans':
+        case 'admin_plan_save':
+        case 'admin_plan_delete':
+        case 'admin_plan_sync':
+        case 'admin_bandwidths':
+        case 'admin_bandwidth_save':
+        case 'admin_bandwidth_delete':
+            require __DIR__ . '/core_plans_bandwidth.php';
+            break;
 
-    // 5. Modul Jaringan, Router, IP Pool & MikroTik Live Monitor
-    case 'admin_routers':
-    case 'admin_router_save':
-    case 'admin_router_delete':
-    case 'admin_pools':
-    case 'admin_pool_save':
-    case 'admin_pool_delete':
-    case 'mikrotik_live':
-    case 'admin_router_status':
-    case 'online_users':
-    case 'admin_online_users':
-    case 'data_usage':
-    case 'admin_data_usage':
-    case 'mikrotik_extra':
-    case 'user_live_traffic':
-    case 'admin_user_live_traffic':
-    case 'kick_user':
-    case 'admin_kick_user':
-    case 'router_reboot':
-    case 'admin_router_reboot':
-        require __DIR__ . '/core_network_mikrotik.php';
-        break;
+        // 5. Modul Jaringan, Router, IP Pool & MikroTik Live Monitor
+        case 'admin_routers':
+        case 'admin_router_save':
+        case 'admin_router_delete':
+        case 'admin_pools':
+        case 'admin_pool_save':
+        case 'admin_pool_delete':
+        case 'mikrotik_live':
+        case 'admin_router_status':
+        case 'online_users':
+        case 'admin_online_users':
+        case 'data_usage':
+        case 'admin_data_usage':
+        case 'mikrotik_extra':
+        case 'user_live_traffic':
+        case 'admin_user_live_traffic':
+        case 'kick_user':
+        case 'admin_kick_user':
+        case 'router_reboot':
+        case 'admin_router_reboot':
+            require __DIR__ . '/core_network_mikrotik.php';
+            break;
 
-    // 6. Modul Laporan Keuangan, Kirim Pesan Broadcast & Halaman Statis
-    case 'admin_reports':
-    case 'admin_send_message':
-    case 'pages':
-    case 'admin_pages':
-    case 'page_save':
-    case 'admin_page_save':
-        require __DIR__ . '/core_reports_messages.php';
-        break;
+        // 6. Modul Laporan Keuangan, Kirim Pesan Broadcast & Halaman Statis
+        case 'admin_reports':
+        case 'admin_send_message':
+        case 'pages':
+        case 'admin_pages':
+        case 'page_save':
+        case 'admin_page_save':
+            require __DIR__ . '/core_reports_messages.php';
+            break;
 
-    // 7. Modul Pengaturan Sistem, Lokalisasi, Maintenance, Notifikasi, Staf, DB & Log
-    case 'admin_settings':
-    case 'admin_settings_save':
-    case 'admin_test_notif':
-    case 'admin_notifications_get':
-    case 'admin_notifications_save':
-    case 'admin_db_status':
-    case 'admin_db_backup':
-    case 'admin_staff_list':
-    case 'admin_staff_save':
-    case 'admin_staff_delete':
-    case 'admin_change_password':
-    case 'admin_logs':
-    case 'system_tools':
-    case 'admin_system_tools':
-        require __DIR__ . '/core_settings_staff.php';
-        break;
+        // 7. Modul Pengaturan Sistem, Lokalisasi, Maintenance, Notifikasi, Staf, DB & Log
+        case 'admin_settings':
+        case 'admin_settings_save':
+        case 'admin_test_notif':
+        case 'admin_notifications_get':
+        case 'admin_notifications_save':
+        case 'admin_db_status':
+        case 'admin_db_backup':
+        case 'admin_staff_list':
+        case 'admin_staff_save':
+        case 'admin_staff_delete':
+        case 'admin_change_password':
+        case 'admin_logs':
+        case 'system_tools':
+        case 'admin_system_tools':
+            require __DIR__ . '/core_settings_staff.php';
+            break;
 
-    // 8. Modul Plugin: Peta, Kupon Promo, Asset Manager & Audit Payment Gateway
-    case 'map_all':
-    case 'admin_map_data':
-    case 'coupons':
-    case 'admin_coupons':
-    case 'admin_coupon_save':
-    case 'admin_coupon_status':
-    case 'admin_coupon_delete':
-    case 'assets':
-    case 'admin_assets':
-    case 'asset_save':
-    case 'admin_asset_save':
-    case 'asset_delete':
-    case 'admin_asset_delete':
-    case 'pg_action':
-    case 'admin_payment_gateways':
-    case 'admin_pg_action':
-        require __DIR__ . '/plugin_coupons_assets_pg.php';
-        break;
+        // 8. Modul Plugin: Peta, Kupon Promo, Asset Manager & Audit Payment Gateway
+        case 'map_all':
+        case 'admin_map_data':
+        case 'coupons':
+        case 'admin_coupons':
+        case 'admin_coupon_save':
+        case 'admin_coupon_status':
+        case 'admin_coupon_delete':
+        case 'assets':
+        case 'admin_assets':
+        case 'asset_save':
+        case 'admin_asset_save':
+        case 'asset_delete':
+        case 'admin_asset_delete':
+        case 'pg_action':
+        case 'admin_payment_gateways':
+        case 'admin_pg_action':
+            require __DIR__ . '/plugin_coupons_assets_pg.php';
+            break;
 
-    // 9. Modul Plugin GenieACS TR-069 (Admin & Customer)
-    case 'admin_genieacs_hosts':
-    case 'admin_genieacs_host_save':
-    case 'admin_genieacs_host_action':
-    case 'admin_genieacs_dashboard':
-    case 'admin_genieacs_devices':
-    case 'admin_genieacs_device_detail':
-    case 'admin_genieacs_device_action':
-    case 'admin_genieacs_wan_save':
-    case 'admin_genieacs_wlan_save':
-    case 'customer_genieacs_dashboard':
-    case 'genieacs_customer_dashboard':
-    case 'my_device':
-    case 'customer_device':
-    case 'customer_genieacs_wlan_save':
-    case 'genieacs_customer_wlan_edit':
-    case 'customer_wifi_save':
-    case 'customer_genieacs_reboot':
-    case 'genieacs_customer_reboot':
-    case 'customer_device_reboot':
-    case 'customer_genieacs_summon':
-    case 'customer_device_refresh':
-        require __DIR__ . '/plugin_genieacs.php';
-        break;
+        // 9. Modul Plugin GenieACS TR-069 (Admin & Customer)
+        case 'admin_genieacs_hosts':
+        case 'admin_genieacs_host_save':
+        case 'admin_genieacs_host_action':
+        case 'admin_genieacs_dashboard':
+        case 'admin_genieacs_devices':
+        case 'admin_genieacs_device_detail':
+        case 'admin_genieacs_device_action':
+        case 'admin_genieacs_wan_save':
+        case 'admin_genieacs_wlan_save':
+        case 'customer_genieacs_dashboard':
+        case 'genieacs_customer_dashboard':
+        case 'my_device':
+        case 'customer_device':
+        case 'customer_genieacs_wlan_save':
+        case 'genieacs_customer_wlan_edit':
+        case 'customer_wifi_save':
+        case 'customer_genieacs_reboot':
+        case 'genieacs_customer_reboot':
+        case 'customer_device_reboot':
+        case 'customer_genieacs_summon':
+        case 'customer_device_refresh':
+            require __DIR__ . '/plugin_genieacs.php';
+            break;
 
-    // 10. Modul Portal APK Pelanggan
-    case 'login':
-    case 'dashboard':
-    case 'plans':
-    case 'transactions':
-    case 'toggle_renewal':
-    case 'redeem_voucher':
-    case 'buy':
-    case 'qris_buy':
-    case 'payment_detail':
-    case 'check_payment':
-    case 'qris_status':
-    case 'cancel_payment':
-    case 'qris_cancel':
-        require __DIR__ . '/customer_portal_api.php';
-        break;
+        // 10. Modul Portal APK Pelanggan
+        case 'login':
+        case 'dashboard':
+        case 'plans':
+        case 'transactions':
+        case 'toggle_renewal':
+        case 'redeem_voucher':
+        case 'buy':
+        case 'qris_buy':
+        case 'payment_detail':
+        case 'check_payment':
+        case 'qris_status':
+        case 'cancel_payment':
+        case 'qris_cancel':
+            require __DIR__ . '/customer_portal_api.php';
+            break;
 
-    default:
-        $comp_name = $config['CompanyName'] ?? 'PHPNuxBill';
-        $curr_code = $config['currency_code'] ?? 'Rp.';
-        api_out(true, 'Terhubung ke ' . $comp_name . ' (PHPNuxBill Mobile API v3.0.0)', [
-            'version'       => '3.0.0',
-            'action'        => $action,
-            'company_name'  => $comp_name,
-            'currency_code' => $curr_code,
-            'company'       => [
-                'name'     => $comp_name,
-                'currency' => $curr_code
-            ]
-        ]);
-        break;
+        default:
+            $comp_name = $config['CompanyName'] ?? 'PHPNuxBill';
+            $curr_code = $config['currency_code'] ?? 'Rp.';
+            api_out(true, 'Terhubung ke ' . $comp_name . ' (PHPNuxBill Mobile API v3.0.0)', [
+                'version'       => '3.0.0',
+                'action'        => $action,
+                'company_name'  => $comp_name,
+                'currency_code' => $curr_code,
+                'company'       => [
+                    'name'     => $comp_name,
+                    'currency' => $curr_code
+                ]
+            ]);
+            break;
+    }
+} catch (Throwable $e) {
+    api_out(
+        false,
+        'Server Error pada ' . $action . ': ' . $e->getMessage() . ' (' . basename($e->getFile()) . ':' . $e->getLine() . ')',
+        null,
+        500
+    );
 }
