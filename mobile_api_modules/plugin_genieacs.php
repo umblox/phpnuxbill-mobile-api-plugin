@@ -3,7 +3,7 @@
  * PHPNuxBill Mobile API Plugin - GenieACS TR-069 Pro Module (Admin & Customer)
  * Path: system/plugin/mobile_api_modules/plugin_genieacs.php
  * Supports HTTP/HTTPS, Multi-Host, Optical ONT & Standard Wireless Routers (HTB/Ethernet),
- * WAN/WLAN TR-098 & TR-181, Connected Hosts, Tags, Raw JSON, and Customer Self-Service Portal.
+ * Auto Bot/Scanner Junk Cleanup, WAN/WLAN TR-098 & TR-181, Connected Hosts, Tags, and Customer Portal.
  */
 
 global $config, $_c, $admin, $user, $ui;
@@ -207,8 +207,8 @@ if (!class_exists('GenieACSClient')) {
 
         /**
          * Summon & Refresh Parameter Perangkat:
-         * Menarik cabang DeviceInfo, WANDevice, dan LANDevice agar router biasa (seperti TOTOLINK, TP-Link, Tenda)
-         * di jaringan HTB langsung memperbarui Uptime, WAN IP, SSID, dan Daftar Perangkat Terhubung.
+         * Mengirim getParameterValues eksplisit untuk UpTime, WAN, dan WLAN (agar router seperti TOTOLINK N200RE
+         * langsung mengirimkan Uptime), diikuti refreshObject pada cabang utama.
          */
         public function summonDevice($deviceId, $fullRefresh = false)
         {
@@ -221,7 +221,27 @@ if (!class_exists('GenieACSClient')) {
                 );
             }
 
-            // Antrekan refresh pada cabang utama tanpa memblokir, lalu picu connection_request pada task terakhir
+            // 1. Minta nilai parameter spesifik menggunakan getParameterValues (sangat efektif untuk router non-ONT)
+            $this->request("/devices/{$encodedId}/tasks", 'POST', [
+                'name'           => 'getParameterValues',
+                'parameterNames' => [
+                    'InternetGatewayDevice.DeviceInfo.UpTime',
+                    'InternetGatewayDevice.DeviceInfo.SoftwareVersion',
+                    'InternetGatewayDevice.DeviceInfo.HardwareVersion',
+                    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANIPConnection.1.ExternalIPAddress',
+                    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANIPConnection.1.Uptime',
+                    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.ExternalIPAddress',
+                    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Username',
+                    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Uptime',
+                    'InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.SSID',
+                    'InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.AssociatedDeviceNumberOfEntries',
+                    'InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.TotalAssociations',
+                    'InternetGatewayDevice.LANDevice.1.Hosts.HostNumberOfEntries',
+                    'Device.DeviceInfo.UpTime'
+                ]
+            ], 8);
+
+            // 2. Segarkan cabang DeviceInfo, WANDevice, dan LANDevice lalu picu connection_request
             $branches = [
                 'InternetGatewayDevice.DeviceInfo',
                 'InternetGatewayDevice.WANDevice.1',
@@ -283,6 +303,45 @@ if (!class_exists('GenieACSClient')) {
         {
             return $this->request('/tasks/' . rawurlencode($taskId), 'DELETE');
         }
+    }
+}
+
+/**
+ * Deteksi entri perangkat palsu / hasil injeksi bot scanner internet (seperti Mirai / DISCOVERYSERVICE / wget / cd /tmp)
+ */
+if (!function_exists('genieacs_is_junk_bot_device')) {
+    function genieacs_is_junk_bot_device($d)
+    {
+        $id   = (string)($d['_id'] ?? '');
+        $sn   = (string)($d['_deviceId']['_SerialNumber'] ?? '');
+        $mfg  = (string)($d['_deviceId']['_Manufacturer'] ?? '');
+        $pc   = (string)($d['_deviceId']['_ProductClass'] ?? '');
+        $comb = strtolower($id . ' ' . $sn . ' ' . $mfg . ' ' . $pc);
+
+        $badPatterns = [
+            'wget ',
+            'curl ',
+            'cd /tmp',
+            'cd /var',
+            'cd /mnt',
+            'chmod ',
+            'rm -rf',
+            'busybox',
+            '/bin/sh',
+            '||',
+            '`',
+            '$(',
+            ';',
+            'discoveryservice',
+            'x router'
+        ];
+
+        foreach ($badPatterns as $pat) {
+            if (strpos($comb, $pat) !== false) {
+                return true;
+            }
+        }
+        return false;
     }
 }
 
@@ -395,10 +454,17 @@ if (!function_exists('genieacs_load_config')) {
 }
 
 if (!function_exists('genieacs_format_uptime')) {
-    function genieacs_format_uptime($seconds)
+    function genieacs_format_uptime($val)
     {
-        if (!$seconds || !is_numeric($seconds) || (int)$seconds <= 0) return '-';
-        $s = (int)$seconds;
+        if ($val === null || $val === '' || $val === '-' || $val === 'N/A') {
+            return '-';
+        }
+        if (!is_numeric($val)) {
+            $clean = trim((string)$val);
+            return $clean !== '' ? $clean : '-';
+        }
+        $s = (int)$val;
+        if ($s <= 0) return '-';
         $days = floor($s / 86400);
         $s %= 86400;
         $hours = floor($s / 3600);
@@ -451,7 +517,6 @@ if (!function_exists('genieacs_extract_wlan_configs')) {
                 $enableVal = $wlan['Enable']['_value'] ?? true;
                 $isEnabled = ($enableVal === true || $enableVal === 1 || $enableVal === '1' || $enableVal === 'true');
 
-                // Hitung connected_devices dari parameter angka ATAU jumlah objek di AssociatedDevice
                 $assocCountParam = (int)($wlan['AssociatedDeviceNumberOfEntries']['_value']
                     ?? $wlan['TotalAssociations']['_value']
                     ?? $wlan['X_CT-COM_AssociatedDeviceNumberOfEntries']['_value']
@@ -621,7 +686,7 @@ if (!function_exists('genieacs_extract_connected_hosts')) {
             }
         }
 
-        // 2. TR-098 WLANConfiguration.i.AssociatedDevice (Fallback untuk router yang hanya melaporkan klien di bawah cabang WiFi)
+        // 2. TR-098 WLANConfiguration.i.AssociatedDevice
         for ($i = 1; $i <= 8; $i++) {
             $assocMap = $device['InternetGatewayDevice']['LANDevice']['1']['WLANConfiguration'][$i]['AssociatedDevice'] ?? [];
             if (!is_array($assocMap)) continue;
@@ -678,9 +743,9 @@ if (!function_exists('genieacs_extract_connected_hosts')) {
 if (!function_exists('genieacs_extract_device_info')) {
     function genieacs_extract_device_info($d)
     {
-        $pppoe        = 'N/A';
-        $wan_ip       = 'N/A';
-        $wan_uptime   = null;
+        $pppoe      = 'N/A';
+        $wan_ip     = 'N/A';
+        $wan_uptime = null;
 
         for ($i = 1; $i <= 8; $i++) {
             $wanConn = $d['InternetGatewayDevice']['WANDevice']['1']['WANConnectionDevice'][$i] ?? null;
@@ -697,7 +762,9 @@ if (!function_exists('genieacs_extract_device_info')) {
 
             if ($wan_uptime === null) {
                 $wan_uptime = $wanConn['WANPPPConnection']['1']['Uptime']['_value']
+                    ?? $wanConn['WANPPPConnection']['1']['UpTime']['_value']
                     ?? $wanConn['WANIPConnection']['1']['Uptime']['_value']
+                    ?? $wanConn['WANIPConnection']['1']['UpTime']['_value']
                     ?? null;
             }
         }
@@ -817,7 +884,7 @@ if (!function_exists('genieacs_extract_device_info')) {
             }
         }
 
-        // Hitung jumlah perangkat terhubung dari WLAN, HostNumberOfEntries, maupun tabel Hosts (kompatibel penuh dengan TOTOLINK/HTB)
+        // Hitung jumlah perangkat terhubung dari WLAN, HostNumberOfEntries, maupun tabel Hosts
         $wlanConnected = 0;
         $wlanCfgs = genieacs_extract_wlan_configs($d);
         foreach ($wlanCfgs as $wc) {
@@ -834,8 +901,10 @@ if (!function_exists('genieacs_extract_device_info')) {
         $isOnline     = ($lastInformTs > 0 && (time() - $lastInformTs) < 300);
 
         $uptimeRaw = $d['InternetGatewayDevice']['DeviceInfo']['UpTime']['_value']
+            ?? $d['InternetGatewayDevice']['DeviceInfo']['Uptime']['_value']
             ?? $d['Device']['DeviceInfo']['UpTime']['_value']
             ?? $d['VirtualParameters']['UpTime']['_value']
+            ?? $d['VirtualParameters']['uptime']['_value']
             ?? $wan_uptime;
 
         $productClass = (string)($d['_deviceId']['_ProductClass'] ?? '-');
@@ -853,7 +922,7 @@ if (!function_exists('genieacs_extract_device_info')) {
                 ?? ($d['Device']['DeviceInfo']['SoftwareVersion']['_value'] ?? '-')),
             'hardware_version'   => (string)($d['InternetGatewayDevice']['DeviceInfo']['HardwareVersion']['_value']
                 ?? ($d['Device']['DeviceInfo']['HardwareVersion']['_value'] ?? '-')),
-            'uptime_seconds'     => (int)($uptimeRaw ?: 0),
+            'uptime_seconds'     => is_numeric($uptimeRaw) ? (int)$uptimeRaw : 0,
             'uptime'             => genieacs_format_uptime($uptimeRaw),
             'pppoe_username'     => $pppoe,
             'wan_ip'             => $wan_ip,
@@ -913,7 +982,6 @@ if (!function_exists('genieacs_resolve_customer_device')) {
             }
         }
 
-        // Fallback pencocokan IP untuk pelanggan HTB / Static IP
         $custIp = trim((string)($customer['pppoe_ip'] ?? ''));
         if ($custIp !== '') {
             $ipRegex = ['$regex' => preg_quote($custIp, '/'), '$options' => 'i'];
@@ -1074,7 +1142,7 @@ switch ($action) {
 
     case 'admin_genieacs_host_action':
         require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
-        $sub    = strtolower(trim((string)(_req('sub_action') ?: 'test'))); // test | setactive | delete
+        $sub    = strtolower(trim((string)(_req('sub_action') ?: 'test')));
         $hostId = trim((string)_req('id'));
         $hosts  = genieacs_get_hosts();
 
@@ -1138,7 +1206,7 @@ switch ($action) {
         break;
 
     // =========================================================================
-    // 2. DASHBOARD & DAFTAR PERANGKAT TR-069 - ADMIN
+    // 2. DASHBOARD & DAFTAR PERANGKAT TR-069 (DENGAN AUTO-CLEANUP BOT/JUNK)
     // =========================================================================
     case 'admin_genieacs_dashboard':
         require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
@@ -1161,9 +1229,16 @@ switch ($action) {
         if ($client) {
             $result = $client->getDevices([], 500, 0, genieacs_default_projections());
             if (!empty($result['success']) && is_array($result['data'])) {
-                $rawList = $result['data'];
-                $stats['total'] = count($rawList);
-                foreach ($rawList as $idx => $d) {
+                foreach ($result['data'] as $d) {
+                    // Hapus otomatis jika terdeteksi sebagai bot scanner / command injection
+                    if (genieacs_is_junk_bot_device($d)) {
+                        if (!empty($d['_id'])) {
+                            @$client->deleteDevice($d['_id']);
+                        }
+                        continue;
+                    }
+
+                    $stats['total']++;
                     $info = genieacs_extract_device_info($d);
                     if ($info['online']) {
                         $stats['online']++;
@@ -1179,7 +1254,7 @@ switch ($action) {
                     if ($info['temperature_status'] === 'critical') {
                         $stats['high_temp_count']++;
                     }
-                    if ($idx < 10) {
+                    if (count($recentDevices) < 10) {
                         $recentDevices[] = $info;
                     }
                 }
@@ -1202,9 +1277,9 @@ switch ($action) {
         require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
         $hostId       = trim((string)_req('host_id'));
         $search       = trim((string)_req('search'));
-        $statusFilter = strtolower(trim((string)(_req('status_filter') ?: 'all'))); // all | online | offline | bad_rx
-        $sortBy       = strtolower(trim((string)(_req('sort_by') ?: 'last_inform'))); // last_inform | rx_power | temp | connected | serial
-        $sortDir      = strtolower(trim((string)(_req('sort_dir') ?: 'desc'))); // asc | desc
+        $statusFilter = strtolower(trim((string)(_req('status_filter') ?: 'all')));
+        $sortBy       = strtolower(trim((string)(_req('sort_by') ?: 'last_inform')));
+        $sortDir      = strtolower(trim((string)(_req('sort_dir') ?: 'desc')));
         $page         = max(1, (int)(_req('page') ?: 1));
         $limit        = max(10, min(200, (int)(_req('limit') ?: 50)));
         $skip         = ($page - 1) * $limit;
@@ -1251,6 +1326,12 @@ switch ($action) {
         $allExtracted = [];
         if (is_array($result['data'])) {
             foreach ($result['data'] as $d) {
+                if (genieacs_is_junk_bot_device($d)) {
+                    if (!empty($d['_id'])) {
+                        @$client->deleteDevice($d['_id']);
+                    }
+                    continue;
+                }
                 $info = genieacs_extract_device_info($d);
                 if ($statusFilter === 'online' && !$info['online']) continue;
                 if ($statusFilter === 'offline' && $info['online']) continue;
@@ -1294,7 +1375,7 @@ switch ($action) {
         break;
 
     // =========================================================================
-    // 3. DETAIL PERANGKAT LENGKAP (INFO, OPTIK, WAN, WLAN, HOSTS, RAW JSON) - ADMIN
+    // 3. DETAIL PERANGKAT LENGKAP (INFO, OPTIK, WAN, WLAN, HOSTS, RAW JSON)
     // =========================================================================
     case 'admin_genieacs_device_detail':
         require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
@@ -1351,11 +1432,25 @@ switch ($action) {
         $hostId   = trim((string)_req('host_id'));
         $deviceId = trim((string)(_req('id') ?: _req('device_id')));
         $sub      = strtolower(trim((string)(_req('sub_action') ?: 'summon')));
-        // summon | refresh | reboot | factory_reset | add_tag | remove_tag | clear_tasks | delete_device
 
-        if ($deviceId === '') api_out(false, 'Device ID wajib diisi.', null, 400);
         $client = genieacs_load_config($hostId);
         if (!$client) api_out(false, 'Server GenieACS belum dikonfigurasi.', null, 400);
+
+        if ($sub === 'clean_junk') {
+            $resAll = $client->getDevices([], 500, 0, ['_id', '_deviceId']);
+            $cleaned = 0;
+            if (!empty($resAll['success']) && is_array($resAll['data'])) {
+                foreach ($resAll['data'] as $d) {
+                    if (genieacs_is_junk_bot_device($d) && !empty($d['_id'])) {
+                        $client->deleteDevice($d['_id']);
+                        $cleaned++;
+                    }
+                }
+            }
+            api_out(true, "{$cleaned} perangkat bot/sampah berhasil dibersihkan dari GenieACS.");
+        }
+
+        if ($deviceId === '') api_out(false, 'Device ID wajib diisi.', null, 400);
 
         if ($sub === 'reboot') {
             $res = $client->rebootDevice($deviceId);
@@ -1368,7 +1463,7 @@ switch ($action) {
         if ($sub === 'summon' || $sub === 'refresh') {
             $res = $client->summonDevice($deviceId, ($sub === 'refresh'));
             if (!empty($res['success'])) {
-                api_out(true, 'Perintah Summon & Sinkronisasi Parameter (DeviceInfo, WAN, WiFi & Host) berhasil dikirim ke ' . $deviceId . '.');
+                api_out(true, 'Perintah Summon & penarikan parameter (Uptime, WAN, WiFi & Host) berhasil dikirim ke ' . $deviceId . '.');
             }
             api_out(false, 'Gagal melakukan Summon: ' . ($res['error'] ?? 'Unknown error'), null, 500);
         }
@@ -1415,7 +1510,7 @@ switch ($action) {
             api_out(true, "{$deleted} antrean task pada perangkat berhasil dibersihkan.");
         }
 
-        if ($sub === 'delete_device') {
+        if ($sub === 'delete_device' || $sub === 'delete') {
             $res = $client->deleteDevice($deviceId);
             if (!empty($res['success'])) {
                 api_out(true, 'Perangkat berhasil dihapus dari database GenieACS.');
