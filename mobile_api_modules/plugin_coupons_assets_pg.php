@@ -4,6 +4,56 @@
  * Path: system/plugin/mobile_api_modules/plugin_coupons_assets_pg.php
  */
 
+global $config, $_c, $admin, $ui, $UPLOAD_PATH, $DEVICE_PATH, $PAYMENTGATEWAY_PATH, $phpnux_root;
+
+if (!function_exists('get_valid_payment_gateway_names')) {
+    function get_valid_payment_gateway_names($pg_dir, $config) {
+        $known = [
+            'viaqris'  => true,
+            'tripay'   => true,
+            'duitku'   => true,
+            'xendit'   => true,
+            'paypal'   => true,
+            'midtrans' => true,
+            'ipaymu'   => true,
+            'tokopay'  => true,
+            'flip'     => true,
+            'moota'    => true,
+            'oy'       => true,
+            'doku'     => true,
+            'faspay'   => true,
+            'nicepay'  => true,
+            'stripe'   => true
+        ];
+
+        $root_dir = !empty($GLOBALS['phpnux_root']) ? $GLOBALS['phpnux_root'] : dirname(__DIR__, 3);
+        $scan_dirs = [
+            rtrim($pg_dir, '/\\'),
+            $root_dir . DIRECTORY_SEPARATOR . ltrim(rtrim($pg_dir, '/\\'), '/\\')
+        ];
+
+        foreach ($scan_dirs as $dir) {
+            if (is_dir($dir)) {
+                foreach (glob($dir . DIRECTORY_SEPARATOR . '*.php') ?: [] as $f) {
+                    $base = strtolower(basename($f, '.php'));
+                    if ($base !== '' && $base !== 'index') {
+                        $known[$base] = true;
+                    }
+                }
+            }
+        }
+
+        $cfg_pgs = array_filter(array_map('trim', explode(',', strtolower((string)($config['payment_gateway'] ?? '')))));
+        foreach ($cfg_pgs as $g) {
+            if ($g !== '' && $g !== 'none') {
+                $known[$g] = true;
+            }
+        }
+
+        return $known;
+    }
+}
+
 switch ($action) {
     // =========================================================================
     // PETA, KUPON PROMO, ASSET MANAGER & AUDIT PAYMENT GATEWAY
@@ -70,7 +120,7 @@ switch ($action) {
                     'lng'       => (float)$p[1]
                 ];
             }
-        } catch (Exception $e) {}
+        } catch (Throwable $e) {}
 
         api_out(true, 'Data peta berhasil dimuat', [
             'customers' => $customers,
@@ -273,15 +323,15 @@ switch ($action) {
     case 'pg_action':
     case 'admin_payment_gateways':
     case 'admin_pg_action':
-        global $PAYMENTGATEWAY_PATH;
         $pg_dir = !empty($PAYMENTGATEWAY_PATH) ? $PAYMENTGATEWAY_PATH : 'system/paymentgateway';
+        $valid_pg_map = get_valid_payment_gateway_names($pg_dir, $config);
 
         $admin = require_admin_session($api_secret);
         $sub = trim(_req('sub_action') ?: ($action === 'admin_payment_gateways' ? 'list' : 'check'));
 
         if ($sub === 'list') {
             $status    = _req('status');
-            $gw_filter = trim(_req('gateway'));
+            $gw_filter = strtolower(trim((string)_req('gateway')));
             $search    = trim(_req('search'));
             $limit     = max(20, min(150, (int)(_req('limit') ?: 80)));
 
@@ -289,12 +339,15 @@ switch ($action) {
             if ($status !== '' && $status !== null && strtolower((string)$status) !== 'all') {
                 $q->where('status', (int)$status);
             }
-            if ($gw_filter !== '' && strtolower($gw_filter) !== 'all') {
-                $q->where_raw('LOWER(gateway) = ?', [strtolower($gw_filter)]);
+            if ($gw_filter !== '' && $gw_filter !== 'all') {
+                $q->where_raw('LOWER(gateway) = ?', [$gw_filter]);
             }
             if ($search !== '') {
                 $like = '%' . $search . '%';
-                $q->where_raw('(username LIKE ? OR plan_name LIKE ? OR gateway LIKE ? OR payment_method LIKE ? OR payment_channel LIKE ? OR trx_invoice LIKE ? OR gateway_trx_id LIKE ?)', [$like, $like, $like, $like, $like, $like, $like]);
+                $q->where_raw(
+                    '(username LIKE ? OR plan_name LIKE ? OR gateway LIKE ? OR payment_method LIKE ? OR payment_channel LIKE ? OR trx_invoice LIKE ? OR gateway_trx_id LIKE ?)',
+                    [$like, $like, $like, $like, $like, $like, $like]
+                );
             }
 
             $rows = $q->order_by_desc('id')->limit($limit)->find_many();
@@ -304,11 +357,17 @@ switch ($action) {
             $total_unpaid = 0;
 
             foreach ($rows as $r) {
+                $raw_gw_lower = strtolower(trim((string)($r['gateway'] ?? '')));
+                // Abaikan baris yang kolom gateway-nya berisi nama orang/pelanggan atau bukan Payment Gateway sah
+                if ($raw_gw_lower === '' || !isset($valid_pg_map[$raw_gw_lower])) {
+                    continue;
+                }
+
                 $parsed = parse_qris_trx($r, $config);
                 if (!$parsed) continue;
                 $items[] = $parsed;
 
-                $g_key = strtoupper($parsed['gateway'] ?: 'LAINNYA');
+                $g_key = strtoupper($raw_gw_lower);
                 if (!isset($gw_stats[$g_key])) {
                     $gw_stats[$g_key] = [
                         'gateway'      => $g_key,
@@ -328,11 +387,19 @@ switch ($action) {
             }
 
             $active_gws = get_active_gateways($config);
-            $gw_list = array_values(array_unique(array_merge(
+            $raw_gw_candidates = array_unique(array_merge(
                 ['viaqris', 'tripay', 'duitku', 'xendit', 'paypal'],
                 array_map('strtolower', array_column($active_gws, 'id')),
                 array_map('strtolower', array_keys($gw_stats))
-            )));
+            ));
+
+            $gw_list = [];
+            foreach ($raw_gw_candidates as $cand) {
+                $c_clean = strtolower(trim((string)$cand));
+                if ($c_clean !== '' && isset($valid_pg_map[$c_clean])) {
+                    $gw_list[] = $c_clean;
+                }
+            }
 
             api_out(true, 'Daftar transaksi Payment Gateway dimuat', [
                 'summary' => [
@@ -340,7 +407,7 @@ switch ($action) {
                     'total_unpaid'      => $total_unpaid,
                     'by_gateway'        => array_values($gw_stats)
                 ],
-                'gateways'        => $gw_list,
+                'gateways'        => array_values($gw_list),
                 'active_gateways' => $active_gws,
                 'items'           => $items
             ]);
@@ -348,7 +415,7 @@ switch ($action) {
 
         $trx_id = (int)_req('id');
 
-        $lock_file = sys_get_temp_dir() . '/arneta_paylock_' . $trx_id . '.lock';
+        $lock_file = sys_get_temp_dir() . '/phpnuxbill_paylock_' . $trx_id . '.lock';
         $lock_fp = @fopen($lock_file, 'c+');
         if ($lock_fp) {
             @flock($lock_fp, LOCK_EX);
@@ -371,6 +438,16 @@ switch ($action) {
         if ($sub === 'approve_manual') {
             if (verify_already_recharged($trx)) {
                 api_out(true, 'Tagihan sudah LUNAS sebelumnya.', parse_qris_trx($trx, $config));
+            }
+            $cur_notif = strtolower(trim((string)($config['user_notification_payment'] ?? '')));
+            if ($cur_notif === '' || $cur_notif === 'none') {
+                if (!empty($config['wa_url'])) {
+                    $config['user_notification_payment'] = 'wa';
+                    $_c['user_notification_payment']     = 'wa';
+                } elseif (!empty($config['sms_url'])) {
+                    $config['user_notification_payment'] = 'sms';
+                    $_c['user_notification_payment']     = 'sms';
+                }
             }
             if ($cust && class_exists('Package') && Package::rechargeUser($cust['id'], $trx['routers'], $trx['plan_id'], $trx['gateway'], 'Manual Approve (' . $admin['username'] . ')')) {
                 $trx->status    = 2;
