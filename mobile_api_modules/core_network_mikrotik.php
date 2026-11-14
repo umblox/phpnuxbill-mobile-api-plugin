@@ -4,6 +4,8 @@
  * Path: system/plugin/mobile_api_modules/core_network_mikrotik.php
  */
 
+global $config, $_c, $admin;
+
 switch ($action) {
     // =========================================================================
     // JARINGAN & MIKROTIK MONITOR
@@ -146,7 +148,7 @@ switch ($action) {
                             }
                         }
                     }
-                } catch (Exception $e) {}
+                } catch (Throwable $e) {}
 
                 $if_resp = $client->sendSync(new PEAR2\Net\RouterOS\Request('/interface/print'));
                 $interfaces_list    = [];
@@ -261,7 +263,7 @@ switch ($action) {
                     'download_speed_label' => fmt_bps($rx_bps),
                     'upload_speed_label'   => fmt_bps($tx_bps)
                 ];
-            } catch (Exception $e) {
+            } catch (Throwable $e) {
                 $results[] = [
                     'id' => (int)$r['id'], 'name' => $r['name'], 'ip_address' => $r['ip_address'],
                     'online' => false, 'ping_ms' => 0, 'uptime' => 'Error: ' . $e->getMessage()
@@ -364,7 +366,7 @@ switch ($action) {
                         ];
                     }
                 }
-            } catch (Exception $e) {}
+            } catch (Throwable $e) {}
         }
 
         api_out(true, 'Daftar user online berhasil dimuat', [
@@ -411,7 +413,7 @@ switch ($action) {
                         ];
                     }
                 }
-            } catch (Exception $e) {}
+            } catch (Throwable $e) {}
             api_out(true, 'Data sinyal wireless dimuat', $signals);
         }
 
@@ -429,7 +431,7 @@ switch ($action) {
                 }
             }
             $ros_logs = array_slice(array_reverse($ros_logs), 0, 100);
-        } catch (Exception $e) {}
+        } catch (Throwable $e) {}
         api_out(true, 'Log MikroTik berhasil dimuat', $ros_logs);
         break;
 
@@ -475,7 +477,7 @@ switch ($action) {
                         'value' => $cf['field_value']
                     ];
                 }
-            } catch (Exception $e) {}
+            } catch (Throwable $e) {}
             $recent_trx = ORM::for_table('tbl_transactions')
                 ->where('username', $cust['username'])
                 ->order_by_desc('id')
@@ -635,7 +637,7 @@ switch ($action) {
                         }
                     }
 
-                    $cache_file = sys_get_temp_dir() . '/arneta_usr_spd_' . md5(($r['id'] ?? 0) . '_' . $uname) . '.json';
+                    $cache_file = sys_get_temp_dir() . '/phpnuxbill_usr_spd_' . md5(($r['id'] ?? 0) . '_' . $uname) . '.json';
                     $now_ms = microtime(true);
                     if ($is_online && $rx_bps <= 0 && $tx_bps <= 0 && ($rx_bytes > 0 || $tx_bytes > 0)) {
                         if (file_exists($cache_file)) {
@@ -658,7 +660,7 @@ switch ($action) {
                             'tx' => $tx_bytes
                         ]));
                     }
-                } catch (Exception $e) {}
+                } catch (Throwable $e) {}
             }
         }
 
@@ -782,7 +784,7 @@ switch ($action) {
                 }
             }
             api_out(true, 'Sesi ' . $uname . ' berhasil diputus dari ' . $r['name'] . '.');
-        } catch (Exception $e) {
+        } catch (Throwable $e) {
             api_out(false, 'Gagal memutus sesi: ' . $e->getMessage(), null, 500);
         }
         break;
@@ -794,7 +796,7 @@ switch ($action) {
         if (!$r) api_out(false, 'Router tidak ditemukan.', null, 404);
         $client = connect_ros($r['ip_address'], $r['username'], $r['password']);
         if (!$client) api_out(false, 'Gagal terhubung ke Router.', null, 500);
-        try { @$client->sendSync(new PEAR2\Net\RouterOS\Request('/system/reboot')); } catch (Exception $e) {}
+        try { @$client->sendSync(new PEAR2\Net\RouterOS\Request('/system/reboot')); } catch (Throwable $e) {}
         api_out(true, 'Perintah Reboot dikirim ke Router ' . $r['name'] . '.');
         break;
 }
