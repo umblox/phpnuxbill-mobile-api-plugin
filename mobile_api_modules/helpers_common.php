@@ -4,7 +4,7 @@
  * Path: system/plugin/mobile_api_modules/helpers_common.php
  */
 
-global $config, $_c, $admin, $user, $ui, $root_path, $UPLOAD_PATH, $CACHE_PATH, $DEVICE_PATH, $PLUGIN_PATH, $PAYMENTGATEWAY_PATH, $phpnux_root;
+global $config, $_c, $admin, $user, $ui, $root_path, $lan_file, $_L, $UPLOAD_PATH, $CACHE_PATH, $DEVICE_PATH, $PLUGIN_PATH, $PAYMENTGATEWAY_PATH, $phpnux_root;
 
 // 1. Pastikan working directory berada di root instalasi PHPNuxBill
 $phpnux_root = dirname(__DIR__, 3);
@@ -13,31 +13,7 @@ if (is_dir($phpnux_root . DIRECTORY_SEPARATOR . 'system') && getcwd() !== $phpnu
 }
 $GLOBALS['phpnux_root'] = $phpnux_root;
 
-// 2. Normalisasi $root_path & seluruh variabel path global yang sebelumnya diset '../' oleh system/api.php
-$GLOBALS['root_path']           = '';
-$GLOBALS['UPLOAD_PATH']         = 'system/uploads';
-$GLOBALS['CACHE_PATH']          = 'system/cache';
-$GLOBALS['DEVICE_PATH']         = 'system/devices';
-$GLOBALS['PLUGIN_PATH']         = 'system/plugin';
-$GLOBALS['PAYMENTGATEWAY_PATH'] = 'system/paymentgateway';
-
-$root_path           = &$GLOBALS['root_path'];
-$UPLOAD_PATH         = &$GLOBALS['UPLOAD_PATH'];
-$CACHE_PATH          = &$GLOBALS['CACHE_PATH'];
-$DEVICE_PATH         = &$GLOBALS['DEVICE_PATH'];
-$PLUGIN_PATH         = &$GLOBALS['PLUGIN_PATH'];
-$PAYMENTGATEWAY_PATH = &$GLOBALS['PAYMENTGATEWAY_PATH'];
-
-// 3. Daftarkan Autoloader absolut ke system/autoload/ agar class Message, Http, Package, Lang, dll tidak pernah gagal dimuat
-spl_autoload_register(function ($class) use ($phpnux_root) {
-    $classFile = str_replace('_', DIRECTORY_SEPARATOR, $class) . '.php';
-    $absPath   = $phpnux_root . DIRECTORY_SEPARATOR . 'system' . DIRECTORY_SEPARATOR . 'autoload' . DIRECTORY_SEPARATOR . $classFile;
-    if (file_exists($absPath)) {
-        require_once $absPath;
-    }
-}, true, true);
-
-// 4. Sinkronisasi variabel $config dan $_c dari tbl_appconfig
+// 2. Sinkronisasi variabel $config dan $_c dari tbl_appconfig
 if (empty($GLOBALS['config']) && !empty($GLOBALS['_c']) && is_array($GLOBALS['_c'])) {
     $GLOBALS['config'] = $GLOBALS['_c'];
 }
@@ -47,13 +23,30 @@ if (empty($GLOBALS['config']) || !is_array($GLOBALS['config'])) {
         foreach (ORM::for_table('tbl_appconfig')->find_array() as $_cfg_row) {
             $GLOBALS['config'][$_cfg_row['setting']] = $_cfg_row['value'];
         }
-    } catch (Exception $e) {}
+    } catch (Throwable $e) {}
 }
-$GLOBALS['_c'] = &$GLOBALS['config'];
-$config = &$GLOBALS['config'];
-$_c     = &$GLOBALS['config'];
+$config             = $GLOBALS['config'];
+$_c                 = $GLOBALS['config'];
+$GLOBALS['_c']      = $GLOBALS['config'];
 
-// 5. Pastikan objek $ui selalu tersedia ketika Package::createInvoice() memanggil $ui->assign()
+// 3. Normalisasi seluruh variabel path global agar sesuai dengan working directory root PHPNuxBill
+$GLOBALS['root_path']           = '';
+$GLOBALS['UPLOAD_PATH']         = 'system/uploads';
+$GLOBALS['CACHE_PATH']          = 'system/cache';
+$GLOBALS['DEVICE_PATH']         = 'system/devices';
+$GLOBALS['PLUGIN_PATH']         = 'system/plugin';
+$GLOBALS['PAYMENTGATEWAY_PATH'] = 'system/paymentgateway';
+$GLOBALS['lan_file']            = 'system/lan/' . ($config['language'] ?? 'indonesia') . '.json';
+
+$root_path           = $GLOBALS['root_path'];
+$UPLOAD_PATH         = $GLOBALS['UPLOAD_PATH'];
+$CACHE_PATH          = $GLOBALS['CACHE_PATH'];
+$DEVICE_PATH         = $GLOBALS['DEVICE_PATH'];
+$PLUGIN_PATH         = $GLOBALS['PLUGIN_PATH'];
+$PAYMENTGATEWAY_PATH = $GLOBALS['PAYMENTGATEWAY_PATH'];
+$lan_file            = $GLOBALS['lan_file'];
+
+// 4. Pastikan objek $ui selalu tersedia ketika fungsi internal PHPNuxBill memanggil $ui->assign()
 if (empty($GLOBALS['ui']) || !is_object($GLOBALS['ui'])) {
     $GLOBALS['ui'] = new class {
         public $vars = [];
@@ -76,20 +69,60 @@ if (!defined('U') && defined('APP_URL')) {
     define('U', $clean_u_root . '/?_route=');
 }
 
+// 5. Fallback fungsi input _post, _get, _req jika belum terdefinisi
+if (!function_exists('_post')) {
+    function _post($param, $defvalue = '') {
+        return $_POST[$param] ?? $defvalue;
+    }
+}
+if (!function_exists('_get')) {
+    function _get($param, $defvalue = '') {
+        return $_GET[$param] ?? $defvalue;
+    }
+}
+if (!function_exists('_req')) {
+    function _req($param, $defvalue = '') {
+        return $_REQUEST[$param] ?? ($_POST[$param] ?? ($_GET[$param] ?? $defvalue));
+    }
+}
+
 if (!function_exists('api_out')) {
     function api_out($success, $message, $result = null, $code = 200) {
-        if (ob_get_length()) {
-            ob_clean();
+        $GLOBALS['MOBILE_API_OUTPUT_SENT'] = true;
+        while (ob_get_level() > 0) {
+            @ob_end_clean();
         }
         http_response_code($code);
         header('Content-Type: application/json; charset=utf-8');
-        echo json_encode([
+
+        $flags = JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE;
+        if (defined('JSON_INVALID_UTF8_SUBSTITUTE')) {
+            $flags |= JSON_INVALID_UTF8_SUBSTITUTE;
+        }
+        if (defined('JSON_PARTIAL_OUTPUT_ON_ERROR')) {
+            $flags |= JSON_PARTIAL_OUTPUT_ON_ERROR;
+        }
+
+        $payload = [
             'success' => (bool)$success,
             'status'  => (bool)$success,
             'message' => (string)$message,
             'result'  => $result,
             'data'    => $result
-        ], JSON_UNESCAPED_SLASHES);
+        ];
+
+        $json = json_encode($payload, $flags);
+        if ($json === false || $json === '') {
+            $json = json_encode([
+                'success' => (bool)$success,
+                'status'  => (bool)$success,
+                'message' => (string)$message,
+                'result'  => null,
+                'data'    => null
+            ]);
+        }
+
+        echo $json;
         exit();
     }
 }
@@ -155,8 +188,7 @@ if (!function_exists('require_admin_session')) {
         $dot_parts = explode('.', $token);
         if (count($dot_parts) === 4 && $dot_parts[0] === 'a') {
             list($tipe, $uid, $time, $hash) = $dot_parts;
-            $cfg_tawk = $config['tawkto'] ?? '';
-            if (trim($hash) === sha1($uid . '.' . $time . '.' . $secret) || ($cfg_tawk !== '' && trim($hash) === sha1($uid . '.' . $time . '.' . $cfg_tawk))) {
+            if (trim($hash) === sha1($uid . '.' . $time . '.' . $secret)) {
                 $adm = ORM::for_table('tbl_users')->find_one($uid);
                 if ($adm) return $finalize_adm($adm);
             }
@@ -202,8 +234,7 @@ if (!function_exists('require_customer_session')) {
         $dot_parts = explode('.', $token);
         if (count($dot_parts) === 4 && $dot_parts[0] === 'c') {
             list($tipe, $uid, $time, $hash) = $dot_parts;
-            $cfg_tawk = $config['tawkto'] ?? '';
-            if (trim($hash) === sha1($uid . '.' . $time . '.' . $secret) || ($cfg_tawk !== '' && trim($hash) === sha1($uid . '.' . $time . '.' . $cfg_tawk))) {
+            if (trim($hash) === sha1($uid . '.' . $time . '.' . $secret)) {
                 $cust = ORM::for_table('tbl_customers')->find_one($uid);
                 if ($cust) return $finalize_cust($cust);
             }
@@ -249,17 +280,17 @@ if (!function_exists('write_admin_log')) {
     function write_admin_log($admin, $desc) {
         try {
             if (function_exists('_log')) {
-                _log($desc, $admin['user_type'] ?? 'Admin', $admin['id']);
+                _log($desc, $admin['user_type'] ?? 'Admin', $admin['id'] ?? 0);
             } else {
                 $log = ORM::for_table('tbl_logs')->create();
                 $log->date = date('Y-m-d H:i:s');
                 $log->type = $admin['user_type'] ?? 'Admin';
                 $log->description = $desc;
-                $log->userid = $admin['id'];
+                $log->userid = $admin['id'] ?? 0;
                 $log->ip = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
                 $log->save();
             }
-        } catch (Exception $e) {}
+        } catch (Throwable $e) {}
     }
 }
 
@@ -302,7 +333,7 @@ if (!function_exists('notify_telegram_admin')) {
             } elseif (function_exists('sendTelegram')) {
                 return sendTelegram($text);
             }
-        } catch (Exception $e) {}
+        } catch (Throwable $e) {}
         return null;
     }
 }
@@ -317,7 +348,7 @@ if (!function_exists('notify_whatsapp_customer')) {
             } elseif (function_exists('sendWhatsapp')) {
                 return sendWhatsapp($phone, $text);
             }
-        } catch (Exception $e) {}
+        } catch (Throwable $e) {}
         return null;
     }
 }
@@ -332,7 +363,7 @@ if (!function_exists('notify_sms_customer')) {
             } elseif (function_exists('sendSMS')) {
                 return sendSMS($phone, $text);
             }
-        } catch (Exception $e) {}
+        } catch (Throwable $e) {}
         return null;
     }
 }
@@ -464,7 +495,7 @@ if (!function_exists('ensure_custom_tables')) {
             ];
             foreach ($alter_stmts as $col_name => $sql) {
                 if (!isset($cols[$col_name])) {
-                    try { $db->exec($sql); } catch (Exception $e) {}
+                    try { $db->exec($sql); } catch (Throwable $e) {}
                 }
             }
 
@@ -482,7 +513,7 @@ if (!function_exists('ensure_custom_tables')) {
                 notes TEXT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )");
-        } catch (Exception $e) {}
+        } catch (Throwable $e) {}
     }
 }
 
@@ -530,13 +561,13 @@ if (!function_exists('connect_ros')) {
             try {
                 $c = @Mikrotik::getClient($ip_port, $user, $pass);
                 if ($c) return $c;
-            } catch (Exception $e) {}
+            } catch (Throwable $e) {}
         }
         if (class_exists('PEAR2\Net\RouterOS\Client')) {
             try {
                 $parts = explode(':', $ip_port);
                 return new PEAR2\Net\RouterOS\Client($parts[0], $user, $pass, isset($parts[1]) ? (int)$parts[1] : 8728, false, 4);
-            } catch (Exception $e) {
+            } catch (Throwable $e) {
                 return null;
             }
         }
@@ -998,6 +1029,28 @@ if (empty($GLOBALS['MOBILE_API_SHUTDOWN_REGISTERED'])) {
                     'success' => false, 'status' => false,
                     'message' => $notify ?: 'Gagal membuat transaksi ke Payment Gateway. Pastikan metode/channel pembayaran sudah aktif di Merchant.',
                     'result'  => null, 'data' => null
+                ], JSON_UNESCAPED_SLASHES);
+            }
+            return;
+        }
+
+        // Tangkap Fatal Error PHP jika belum ada JSON yang dikirim oleh api_out()
+        if (empty($GLOBALS['MOBILE_API_OUTPUT_SENT'])) {
+            $err = error_get_last();
+            if ($err && in_array($err['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR])) {
+                while (ob_get_level() > 0) {
+                    @ob_end_clean();
+                }
+                if (!headers_sent()) {
+                    http_response_code(500);
+                    header('Content-Type: application/json; charset=utf-8');
+                }
+                echo json_encode([
+                    'success' => false,
+                    'status'  => false,
+                    'message' => 'Fatal PHP Error: ' . $err['message'] . ' (' . basename($err['file']) . ':' . $err['line'] . ')',
+                    'result'  => null,
+                    'data'    => null
                 ], JSON_UNESCAPED_SLASHES);
             }
         }
