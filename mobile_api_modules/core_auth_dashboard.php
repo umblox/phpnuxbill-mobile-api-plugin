@@ -4,6 +4,8 @@
  * Path: system/plugin/mobile_api_modules/core_auth_dashboard.php
  */
 
+global $config, $_c, $admin, $user, $ui;
+
 switch ($action) {
     // =========================================================================
     // 1. AUTH ADMIN & CUSTOMER (Sesuai system/controllers/admin.php)
@@ -19,9 +21,12 @@ switch ($action) {
             api_out(false, class_exists('Lang') ? Lang::T('Invalid Username or Password') : 'Username dan Password wajib diisi.', null, 400);
         }
 
+        $comp_name = !empty($config['CompanyName']) ? $config['CompanyName'] : 'PHPNuxBill';
+        $curr_code = !empty($config['currency_code']) ? $config['currency_code'] : 'Rp.';
+
         if ($role === 'customer') {
             if (function_exists('run_hook')) {
-                @run_hook('customer_login');
+                try { @run_hook('customer_login'); } catch (Throwable $e) {}
             }
             $cust = ORM::for_table('tbl_customers')->where('username', $username)->find_one();
             if (!$cust || !check_user_password($password, $cust['password'])) {
@@ -32,7 +37,7 @@ switch ($action) {
             }
             $_SESSION['uid'] = $cust['id'];
             if (class_exists('User') && method_exists('User', 'setCookie')) {
-                @User::setCookie($cust['id']);
+                try { @User::setCookie($cust['id']); } catch (Throwable $e) {}
             }
             $cust->last_login = date('Y-m-d H:i:s');
             $cust->save();
@@ -41,11 +46,13 @@ switch ($action) {
             $cust_arr = $cust->as_array();
             unset($cust_arr['password']);
             api_out(true, 'Login Pelanggan berhasil', [
-                'token'    => $token,
-                'customer' => $cust_arr,
-                'company'  => [
-                    'name'            => $config['CompanyName'] ?? 'Arneta.ID',
-                    'currency'        => $config['currency_code'] ?? 'Rp.',
+                'token'         => $token,
+                'company_name'  => $comp_name,
+                'currency_code' => $curr_code,
+                'customer'      => $cust_arr,
+                'company'       => [
+                    'name'            => $comp_name,
+                    'currency'        => $curr_code,
                     'phone'           => $config['phone'] ?? '',
                     'address'         => $config['address'] ?? '',
                     'payment_gateway' => $config['payment_gateway'] ?? 'viaqris'
@@ -54,7 +61,7 @@ switch ($action) {
         }
 
         if (function_exists('run_hook')) {
-            @run_hook('admin_login');
+            try { @run_hook('admin_login'); } catch (Throwable $e) {}
         }
 
         $admin = ORM::for_table('tbl_users')->where('username', $username)->find_one();
@@ -70,7 +77,7 @@ switch ($action) {
 
         $_SESSION['aid'] = $admin['id'];
         if (class_exists('Admin') && method_exists('Admin', 'setCookie')) {
-            @Admin::setCookie($admin['id']);
+            try { @Admin::setCookie($admin['id']); } catch (Throwable $e) {}
         }
         $admin->last_login = date('Y-m-d H:i:s');
         $admin->save();
@@ -82,12 +89,12 @@ switch ($action) {
         unset($adm_arr['password']);
         api_out(true, 'Selamat datang, ' . ($admin['fullname'] ?: $admin['username']), [
             'token'         => $token,
-            'company_name'  => $config['CompanyName'] ?? 'Arneta.ID',
-            'currency_code' => $config['currency_code'] ?? 'Rp.',
+            'company_name'  => $comp_name,
+            'currency_code' => $curr_code,
             'admin'         => $adm_arr,
             'company'       => [
-                'name'     => $config['CompanyName'] ?? 'Arneta.ID',
-                'currency' => $config['currency_code'] ?? 'Rp.',
+                'name'     => $comp_name,
+                'currency' => $curr_code,
                 'phone'    => $config['phone'] ?? '',
                 'address'  => $config['address'] ?? ''
             ]
@@ -99,30 +106,33 @@ switch ($action) {
     // =========================================================================
     case 'webview_sso':
     case 'admin_webview_sso':
+        $GLOBALS['MOBILE_API_OUTPUT_SENT'] = true;
         $token = get_req_token();
-        $target = trim(_get('redirect') ?: _post('redirect') ?: 'dashboard');
+        $target = trim(_req('redirect') ?: (_req('target') ?: 'dashboard'));
 
         if (session_status() === PHP_SESSION_ACTIVE) {
-            setcookie(session_name(), session_id(), 0, '/');
+            @setcookie(session_name(), session_id(), 0, '/');
         }
 
         if (strpos($token, 'c.') === 0) {
             $cust = require_customer_session($api_secret);
             $_SESSION['uid'] = $cust['id'];
             if (class_exists('User') && method_exists('User', 'setCookie')) {
-                @User::setCookie($cust['id']);
+                try { @User::setCookie($cust['id']); } catch (Throwable $e) {}
             }
             if ($target === 'dashboard') $target = 'home';
         } else {
             $adm = require_admin_session($api_secret);
             $_SESSION['aid'] = $adm['id'];
             if (class_exists('Admin') && method_exists('Admin', 'setCookie')) {
-                @Admin::setCookie($adm['id']);
+                try { @Admin::setCookie($adm['id']); } catch (Throwable $e) {}
             }
         }
 
         $clean_root_url = preg_replace('#/system/?$#i', '', rtrim(APP_URL, '/'));
-        if (ob_get_length()) ob_clean();
+        while (ob_get_level() > 0) {
+            @ob_end_clean();
+        }
         header('Location: ' . $clean_root_url . '/?_route=' . ltrim($target, '/'));
         exit();
 
@@ -173,7 +183,7 @@ switch ($action) {
                 $m_idx = (int)$sm['m'];
                 if ($m_idx >= 1 && $m_idx <= 12) $sales_map[$m_idx] = (float)$sm['total'];
             }
-        } catch (Exception $e) {}
+        } catch (Throwable $e) {}
 
         $reg = [];
         $sales = [];
@@ -195,7 +205,7 @@ switch ($action) {
             foreach ($db->query("SELECT plan_id, COUNT(*) AS cnt FROM tbl_user_recharges WHERE status = 'on' GROUP BY plan_id")->fetchAll(PDO::FETCH_ASSOC) as $ur) {
                 $ur_act_map[(int)$ur['plan_id']] = (int)$ur['cnt'];
             }
-        } catch (Exception $e) {}
+        } catch (Throwable $e) {}
 
         $stocks = [];
         foreach (ORM::for_table('tbl_plans')->where('enabled', 1)->find_array() as $p) {
@@ -218,10 +228,15 @@ switch ($action) {
         }
         $unpaid_cnt = (int)ORM::for_table('tbl_payment_gateway')->where('status', 1)->count();
 
+        $comp_name = !empty($config['CompanyName']) ? $config['CompanyName'] : 'PHPNuxBill';
+        $curr_code = !empty($config['currency_code']) ? $config['currency_code'] : 'Rp.';
+
         api_out(true, 'Dashboard berhasil dimuat', [
+            'company_name'  => $comp_name,
+            'currency_code' => $curr_code,
             'company' => [
-                'name'        => $config['CompanyName'] ?? 'Arneta.ID',
-                'currency'    => $config['currency_code'] ?? 'Rp.',
+                'name'        => $comp_name,
+                'currency'    => $curr_code,
                 'date_Period' => date('01 M Y') . ' / ' . date('d M Y')
             ],
             'cards' => [
