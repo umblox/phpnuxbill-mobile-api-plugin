@@ -4,12 +4,13 @@
  * Path: system/plugin/mobile_api_modules/core_plans_bandwidth.php
  */
 
+global $config, $_c, $admin, $ui, $DEVICE_PATH, $_app_stage, $phpnux_root;
+
 switch ($action) {
     // =========================================================================
     // PAKET INTERNET, BANDWIDTH, ROUTERS & DAFTAR PAYMENT USINGS
     // =========================================================================
     case 'admin_plans':
-        global $DEVICE_PATH;
         $admin = require_admin_session($api_secret);
         $is_superadmin = ($admin['user_type'] === 'SuperAdmin');
         $type_filter   = trim(_req('type'));
@@ -23,13 +24,25 @@ switch ($action) {
         }
         unset($b_item);
 
-        $dev_dir = !empty($DEVICE_PATH) ? $DEVICE_PATH : 'system/devices';
+        $root_dir = !empty($phpnux_root) ? $phpnux_root : dirname(__DIR__, 3);
+        $dev_dir  = !empty($DEVICE_PATH) ? $DEVICE_PATH : 'system/devices';
+        $scan_dirs = [
+            $dev_dir,
+            $root_dir . DIRECTORY_SEPARATOR . ltrim($dev_dir, '/\\')
+        ];
+
         $devices = [];
-        if (is_dir($dev_dir)) {
-            foreach (scandir($dev_dir) ?: [] as $file) {
-                if (pathinfo($file, PATHINFO_EXTENSION) === 'php') {
-                    $devices[] = pathinfo($file, PATHINFO_FILENAME);
+        foreach ($scan_dirs as $s_dir) {
+            if (is_dir($s_dir)) {
+                foreach (scandir($s_dir) ?: [] as $file) {
+                    if (pathinfo($file, PATHINFO_EXTENSION) === 'php') {
+                        $dev_name = pathinfo($file, PATHINFO_FILENAME);
+                        if (!in_array($dev_name, $devices)) {
+                            $devices[] = $dev_name;
+                        }
+                    }
                 }
+                if (!empty($devices)) break;
             }
         }
         if (empty($devices)) {
@@ -42,7 +55,7 @@ switch ($action) {
             foreach ($db->query("SELECT plan_id, COUNT(*) AS cnt FROM tbl_user_recharges WHERE status = 'on' GROUP BY plan_id")->fetchAll(PDO::FETCH_ASSOC) as $ur) {
                 $active_cnt_map[(int)$ur['plan_id']] = (int)$ur['cnt'];
             }
-        } catch (Exception $e) {}
+        } catch (Throwable $e) {}
 
         $q = ORM::for_table('tbl_plans');
         if (!in_array($admin['user_type'], ['SuperAdmin', 'Admin'])) {
@@ -115,7 +128,7 @@ switch ($action) {
 
         api_out(true, 'Daftar paket internet & bandwidth dimuat', [
             'is_superadmin'  => $is_superadmin,
-            'voucher_prefix' => $config['voucher_prefix'] ?? 'ARN-',
+            'voucher_prefix' => $config['voucher_prefix'] ?? '',
             'plans'          => $plans,
             'usings'         => $usings,
             'bandwidths'     => $bw_rows,
@@ -130,7 +143,6 @@ switch ($action) {
         break;
 
     case 'admin_plan_save':
-        global $_app_stage;
         $admin = require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
         $id    = (int)_post('id');
         $is_edit = ($id > 0);
@@ -180,7 +192,7 @@ switch ($action) {
 
         if ($db_type === 'Balance') {
             if (function_exists('run_hook')) {
-                @run_hook($is_edit ? 'edit_ppoe' : 'add_ppoe');
+                try { @run_hook($is_edit ? 'edit_ppoe' : 'add_ppoe'); } catch (Throwable $e) {}
             }
             $d->name_plan = $name;
             $d->price     = $price;
@@ -227,9 +239,11 @@ switch ($action) {
         }
 
         if (function_exists('run_hook')) {
-            if ($db_type === 'Hotspot') @run_hook($is_edit ? 'edit_plan' : 'add_plan');
-            elseif ($db_type === 'PPPOE') @run_hook($is_edit ? 'edit_ppoe' : 'add_ppoe');
-            else @run_hook($is_edit ? 'edit_vpn' : 'add_vpn');
+            try {
+                if ($db_type === 'Hotspot') @run_hook($is_edit ? 'edit_plan' : 'add_plan');
+                elseif ($db_type === 'PPPOE') @run_hook($is_edit ? 'edit_ppoe' : 'add_ppoe');
+                else @run_hook($is_edit ? 'edit_vpn' : 'add_vpn');
+            } catch (Throwable $e) {}
         }
 
         $d->name_plan     = $name;
@@ -309,7 +323,7 @@ switch ($action) {
                         } elseif (method_exists($dev_inst, 'add_plan')) {
                             $dev_inst->add_plan($d);
                         }
-                    } catch (Exception $e) {
+                    } catch (Throwable $e) {
                         $router_sync_err = ' (Catatan Router: ' . $e->getMessage() . ')';
                     }
                 }
@@ -324,7 +338,6 @@ switch ($action) {
         break;
 
     case 'admin_plan_delete':
-        global $_app_stage;
         $admin = require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
         $id = (int)_req('id');
         $d = ORM::for_table('tbl_plans')->find_one($id);
@@ -334,10 +347,12 @@ switch ($action) {
 
         $p_type = strtoupper(trim($d['type']));
         if (function_exists('run_hook')) {
-            if ($p_type === 'HOTSPOT') @run_hook('delete_plan');
-            elseif ($p_type === 'PPPOE') @run_hook('delete_ppoe');
-            elseif ($p_type === 'BALANCE') @run_hook('delete_balance');
-            elseif ($p_type === 'VPN') @run_hook('delete_vpn');
+            try {
+                if ($p_type === 'HOTSPOT') @run_hook('delete_plan');
+                elseif ($p_type === 'PPPOE') @run_hook('delete_ppoe');
+                elseif ($p_type === 'BALANCE') @run_hook('delete_balance');
+                elseif ($p_type === 'VPN') @run_hook('delete_vpn');
+            } catch (Throwable $e) {}
         }
 
         if ($p_type !== 'BALANCE' && class_exists('Package') && method_exists('Package', 'getDevice')) {
@@ -351,7 +366,7 @@ switch ($action) {
                         if (method_exists($dev_inst, 'remove_plan')) {
                             @$dev_inst->remove_plan($d);
                         }
-                    } catch (Exception $e) {}
+                    } catch (Throwable $e) {}
                 }
             }
         }
@@ -363,7 +378,6 @@ switch ($action) {
         break;
 
     case 'admin_plan_sync':
-        global $_app_stage;
         $admin = require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
         @set_time_limit(-1);
         $sync_type = strtolower(trim(_req('type') ?: 'hotspot'));
@@ -391,7 +405,7 @@ switch ($action) {
                                 (new $cls())->add_plan($plan);
                                 $done_cnt++;
                                 $logs[] = "DONE : {$plan['name_plan']}, {$plan['device']}";
-                            } catch (Exception $e) {
+                            } catch (Throwable $e) {
                                 $fail_cnt++;
                                 $logs[] = "FAILED : {$plan['name_plan']} ({$e->getMessage()})";
                             }
@@ -414,7 +428,7 @@ switch ($action) {
     case 'admin_bandwidths':
         require_admin_session($api_secret);
         if (function_exists('run_hook')) {
-            @run_hook('view_list_bandwidth');
+            try { @run_hook('view_list_bandwidth'); } catch (Throwable $e) {}
         }
         $rows = ORM::for_table('tbl_bandwidth')->order_by_desc('id')->find_array();
         foreach ($rows as &$r) {
@@ -435,7 +449,7 @@ switch ($action) {
         $rate_up_unit   = (_post('rate_up_unit') === 'Kbps') ? 'Kbps' : 'Mbps';
 
         if (function_exists('run_hook')) {
-            @run_hook($is_edit ? 'edit_bandwidth' : 'add_bandwidth');
+            try { @run_hook($is_edit ? 'edit_bandwidth' : 'add_bandwidth'); } catch (Throwable $e) {}
         }
 
         if ($name === '' || strlen($name) > 255) {
@@ -511,7 +525,7 @@ switch ($action) {
         require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
         $id = (int)_req('id');
         if (function_exists('run_hook')) {
-            @run_hook('delete_bandwidth');
+            try { @run_hook('delete_bandwidth'); } catch (Throwable $e) {}
         }
         $bw = ORM::for_table('tbl_bandwidth')->find_one($id);
         if (!$bw) {
