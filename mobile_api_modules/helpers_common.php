@@ -327,14 +327,17 @@ if (!function_exists('notify_telegram_admin')) {
     function notify_telegram_admin($text) {
         global $config, $_c;
         if (empty($text)) return null;
+        @ob_start();
+        $res = null;
         try {
             if (class_exists('Message') && method_exists('Message', 'sendTelegram')) {
-                return Message::sendTelegram($text);
+                $res = @Message::sendTelegram($text);
             } elseif (function_exists('sendTelegram')) {
-                return sendTelegram($text);
+                $res = @sendTelegram($text);
             }
         } catch (Throwable $e) {}
-        return null;
+        @ob_end_clean();
+        return $res;
     }
 }
 
@@ -342,14 +345,17 @@ if (!function_exists('notify_whatsapp_customer')) {
     function notify_whatsapp_customer($phone, $text) {
         global $config, $_c;
         if (empty($phone) || empty($text)) return null;
+        @ob_start();
+        $res = null;
         try {
             if (class_exists('Message') && method_exists('Message', 'sendWhatsapp')) {
-                return Message::sendWhatsapp($phone, $text);
+                $res = @Message::sendWhatsapp($phone, $text);
             } elseif (function_exists('sendWhatsapp')) {
-                return sendWhatsapp($phone, $text);
+                $res = @sendWhatsapp($phone, $text);
             }
         } catch (Throwable $e) {}
-        return null;
+        @ob_end_clean();
+        return $res;
     }
 }
 
@@ -357,21 +363,24 @@ if (!function_exists('notify_sms_customer')) {
     function notify_sms_customer($phone, $text) {
         global $config, $_c;
         if (empty($phone) || empty($text)) return null;
+        @ob_start();
+        $res = null;
         try {
             if (class_exists('Message') && method_exists('Message', 'sendSMS')) {
-                return Message::sendSMS($phone, $text);
+                $res = @Message::sendSMS($phone, $text);
             } elseif (function_exists('sendSMS')) {
-                return sendSMS($phone, $text);
+                $res = @sendSMS($phone, $text);
             }
         } catch (Throwable $e) {}
-        return null;
+        @ob_end_clean();
+        return $res;
     }
 }
 
 if (!function_exists('sendTelegram')) {
     function sendTelegram($text) {
         if (class_exists('Message') && method_exists('Message', 'sendTelegram')) {
-            return Message::sendTelegram($text);
+            return @Message::sendTelegram($text);
         }
         return null;
     }
@@ -415,44 +424,80 @@ if (!function_exists('build_web_invoice_receipt')) {
             ? Lang::moneyFormat($cur_bal)
             : ($currency . ' ' . number_format($cur_bal, 0, ',', '.'));
 
-        $is_balance = (strtoupper(trim($type)) === 'BALANCE');
+        $is_balance = (strtoupper(trim($type)) === 'BALANCE' || strtolower(trim($in['routers'] ?? '')) === 'balance');
         $tpl = get_official_notif_template($is_balance ? 'invoice_balance' : 'invoice_paid');
+        if (empty($tpl) && $is_balance) {
+            $tpl = get_official_notif_template('balance_send');
+        }
+        if (empty($tpl)) {
+            $tpl = get_official_notif_template('invoice_paid');
+        }
 
-        $wa_text = str_replace(
-            [
-                '[[company_name]]', '[[address]]', '[[phone]]', '[[invoice]]', '[[date]]',
-                '[[payment_gateway]]', '[[payment_channel]]', '[[type]]', '[[plan_name]]',
-                '[[plan_price]]', '[[name]]', '[[note]]', '[[user_name]]', '[[user_password]]',
-                '[[expired_date]]', '[[current_balance]]', '[[footer]]', '[[bills]]', '[[additional_cost]]'
-            ],
-            [
-                $comp_name, $comp_addr, $comp_phone, $inv_no, $date_pretty,
-                $pg_name, $ch_name, $type, $plan_name,
-                $price_fmt, $cust['fullname'] ?? ($cust['username'] ?? '-'), $note ?: ($cust['note'] ?? ''),
-                $cust['username'] ?? '-', $cust['password'] ?? '',
-                $exp_pretty, $bal_fmt, $footer_note, '', ''
-            ],
-            $tpl
-        );
+        if (!empty($tpl)) {
+            $wa_text = str_replace(
+                [
+                    '[[company_name]]', '[[address]]', '[[phone]]', '[[invoice]]', '[[date]]',
+                    '[[payment_gateway]]', '[[payment_channel]]', '[[type]]', '[[plan_name]]',
+                    '[[plan_price]]', '[[name]]', '[[note]]', '[[user_name]]', '[[user_password]]',
+                    '[[expired_date]]', '[[current_balance]]', '[[footer]]', '[[bills]]', '[[additional_cost]]'
+                ],
+                [
+                    $comp_name, $comp_addr, $comp_phone, $inv_no, $date_pretty,
+                    $pg_name, $ch_name, $type, $plan_name,
+                    $price_fmt, $cust['fullname'] ?? ($cust['username'] ?? '-'), $note ?: ($cust['note'] ?? ''),
+                    $cust['username'] ?? '-', $cust['password'] ?? '',
+                    $exp_pretty, $bal_fmt, $footer_note, '', ''
+                ],
+                $tpl
+            );
+        } else {
+            if ($is_balance) {
+                $wa_text = "*{$comp_name}*\n"
+                    . "========================\n"
+                    . "No. Invoice : {$inv_no}\n"
+                    . "Tanggal     : {$date_pretty}\n"
+                    . "Pelanggan   : " . ($cust['fullname'] ?? $cust['username']) . " (@" . ($cust['username'] ?? '-') . ")\n"
+                    . "Layanan     : Top-Up Saldo ({$plan_name})\n"
+                    . "Nominal     : {$price_fmt}\n"
+                    . "Saldo Akhir : *{$bal_fmt}*\n"
+                    . ($note !== '' ? "Catatan     : {$note}\n" : "")
+                    . "========================\n"
+                    . $footer_note;
+            } else {
+                $wa_text = "*{$comp_name}*\n"
+                    . "========================\n"
+                    . "No. Invoice : {$inv_no}\n"
+                    . "Tanggal     : {$date_pretty}\n"
+                    . "Pelanggan   : " . ($cust['fullname'] ?? $cust['username']) . " (@" . ($cust['username'] ?? '-') . ")\n"
+                    . "Paket       : {$plan_name}\n"
+                    . "Harga       : {$price_fmt}\n"
+                    . "Metode      : {$raw_method}\n"
+                    . "Aktif s/d   : *{$exp_pretty}*\n"
+                    . "========================\n"
+                    . $footer_note;
+            }
+        }
 
         return [
-            'trx_id'          => (int)($in['id'] ?? 0),
-            'invoice'         => $inv_no,
-            'customer_id'     => (int)($cust['id'] ?? 0),
-            'username'        => $cust['username'] ?? ($in['username'] ?? '-'),
-            'fullname'        => $cust['fullname'] ?? ($in['username'] ?? '-'),
-            'phonenumber'     => $cust['phonenumber'] ?? '',
-            'plan_name'       => $plan_name,
-            'type'            => $type,
-            'price'           => $price_num,
-            'price_formatted' => $price_fmt,
-            'method'          => $raw_method,
-            'routers'         => $in['routers'] ?? '-',
-            'recharged_at'    => $rech_date,
-            'expiration'      => $exp_date ?: '-',
-            'balance_after'   => $cur_bal,
-            'note'            => $note,
-            'wa_web_text'     => trim($wa_text)
+            'trx_id'            => (int)($in['id'] ?? 0),
+            'invoice'           => $inv_no,
+            'customer_id'       => (int)($cust['id'] ?? 0),
+            'username'          => $cust['username'] ?? ($in['username'] ?? '-'),
+            'fullname'          => $cust['fullname'] ?? ($in['username'] ?? '-'),
+            'phonenumber'       => $cust['phonenumber'] ?? '',
+            'plan_name'         => $plan_name,
+            'type'              => $is_balance ? 'Balance' : $type,
+            'price'             => $price_num,
+            'price_formatted'   => $price_fmt,
+            'method'            => $raw_method,
+            'routers'           => $in['routers'] ?? '-',
+            'recharged_at'      => $rech_date,
+            'expiration'        => $exp_date ?: '-',
+            'expiration_pretty' => $exp_pretty,
+            'balance_after'     => $cur_bal,
+            'balance_formatted' => $bal_fmt,
+            'note'              => $note,
+            'wa_web_text'       => trim($wa_text)
         ];
     }
 }
