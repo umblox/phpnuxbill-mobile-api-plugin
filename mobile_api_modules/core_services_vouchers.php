@@ -13,14 +13,20 @@ if (!function_exists('ensure_official_payment_notif_channel')) {
         $cur = strtolower(trim((string)($config['user_notification_payment'] ?? '')));
         if ($cur === '' || $cur === 'none') {
             if (!empty($config['wa_url'])) {
-                $config['user_notification_payment'] = 'wa';
-                $_c['user_notification_payment']     = 'wa';
+                $config['user_notification_payment']           = 'wa';
+                $_c['user_notification_payment']               = 'wa';
+                $GLOBALS['config']['user_notification_payment'] = 'wa';
+                $GLOBALS['_c']['user_notification_payment']     = 'wa';
             } elseif (!empty($config['sms_url'])) {
-                $config['user_notification_payment'] = 'sms';
-                $_c['user_notification_payment']     = 'sms';
+                $config['user_notification_payment']           = 'sms';
+                $_c['user_notification_payment']               = 'sms';
+                $GLOBALS['config']['user_notification_payment'] = 'sms';
+                $GLOBALS['_c']['user_notification_payment']     = 'sms';
             } elseif (!empty($config['smtp_host'])) {
-                $config['user_notification_payment'] = 'email';
-                $_c['user_notification_payment']     = 'email';
+                $config['user_notification_payment']           = 'email';
+                $_c['user_notification_payment']               = 'email';
+                $GLOBALS['config']['user_notification_payment'] = 'email';
+                $GLOBALS['_c']['user_notification_payment']     = 'email';
             }
         }
     }
@@ -121,12 +127,14 @@ switch ($action) {
     case 'admin_prepaid_recharge':
         // 100% Mengikuti alur resmi system/controllers/plan.php (case 'recharge-post') & Package.php
         $admin = require_admin_session($api_secret);
+        @set_time_limit(60);
         ensure_official_payment_notif_channel();
 
         $id_customer = (int)(_post('customer_id') ?: _post('id_customer'));
         $planId      = (int)(_post('plan_id') ?: _post('plan'));
         $using       = trim(_post('using') ?: 'Cash');
         $req_server  = trim(_post('server') ?: _post('routers'));
+        $note        = trim(_post('note') ?: '');
 
         if ($id_customer <= 0 || $planId <= 0) {
             api_out(false, class_exists('Lang') ? Lang::T('All field is required') : 'Pilih pelanggan dan paket terlebih dahulu.', null, 400);
@@ -188,10 +196,14 @@ switch ($action) {
         }
 
         $ok = false;
+        @ob_start();
         if (class_exists('Package') && method_exists('Package', 'rechargeUser')) {
             // Package::rechargeUser otomatis memanggil Package::createInvoice($in) (Telegram Admin + WA/SMS/Email Pelanggan)
-            $ok = Package::rechargeUser($id_customer, $server, $planId, $gateway, $channel);
+            try {
+                $ok = Package::rechargeUser($id_customer, $server, $planId, $gateway, $channel);
+            } catch (Throwable $e) {}
         }
+        @ob_end_clean();
         unset($zero, $GLOBALS['zero']);
 
         if ($ok) {
@@ -218,14 +230,14 @@ switch ($action) {
             $cust_fresh = ORM::for_table('tbl_customers')->find_one($cust['id']) ?: $cust;
             $in_arr = $in ? $in->as_array() : [
                 'id' => 0, 'invoice' => 'INV-' . time(), 'username' => $cust['username'],
-                'plan_name' => $plan['name_plan'], 'price' => $plan['price'],
+                'plan_name' => $plan['name_plan'], 'price' => ($gateway === 'Recharge Zero' ? 0 : $plan['price']),
                 'recharged_on' => date('Y-m-d'), 'recharged_time' => date('H:i:s'),
                 'expiration' => date('Y-m-d'), 'time' => date('H:i:s'),
                 'method' => $gateway . ' - ' . $channel, 'routers' => $server, 'type' => $plan['type']
             ];
             api_out(true, 'Paket ' . $plan['name_plan'] . ' berhasil diaktifkan untuk ' . $cust['fullname'] . '!', [
                 'invoice' => $in_arr,
-                'receipt' => build_web_invoice_receipt($in_arr, $cust_fresh, $config)
+                'receipt' => build_web_invoice_receipt($in_arr, $cust_fresh, $config, $note)
             ]);
         } else {
             $err = isset($_SESSION['notify']) ? trim(strip_tags($_SESSION['notify'])) : 'Gagal mengaktifkan paket ke Router ' . $server . '.';
@@ -241,7 +253,7 @@ switch ($action) {
         if (!$d) api_out(false, 'Data langganan tidak ditemukan.', null, 404);
 
         if (function_exists('run_hook')) {
-            @run_hook('delete_customer_active_plan');
+            try { @run_hook('delete_customer_active_plan'); } catch (Throwable $e) {}
         }
 
         $p = ORM::for_table('tbl_plans')->find_one($d['plan_id']);
@@ -255,8 +267,10 @@ switch ($action) {
                 require_once $dvc;
                 $d_cls = $p['device'];
                 if (class_exists($d_cls)) {
-                    $dev = new $d_cls();
-                    if (method_exists($dev, 'remove_customer')) @$dev->remove_customer($c, $p);
+                    try {
+                        $dev = new $d_cls();
+                        if (method_exists($dev, 'remove_customer')) @$dev->remove_customer($c, $p);
+                    } catch (Throwable $e) {}
                 }
             }
         }
@@ -285,7 +299,7 @@ switch ($action) {
         }
 
         if (function_exists('run_hook')) {
-            @run_hook('edit_customer_plan');
+            try { @run_hook('edit_customer_plan'); } catch (Throwable $e) {}
         }
 
         if ($expiration !== '') $d->expiration = $expiration;
@@ -309,7 +323,7 @@ switch ($action) {
                         $p_old['plan_expired'] = 0;
                         $cls_old = $p_old['device'];
                         if (class_exists($cls_old)) {
-                            try { (new $cls_old())->remove_customer($customer, $p_old); } catch (Exception $e) {}
+                            try { (new $cls_old())->remove_customer($customer, $p_old); } catch (Throwable $e) {}
                         }
                     }
                 }
@@ -318,7 +332,7 @@ switch ($action) {
                     require_once $dvc_new;
                     $cls_new = $newPlan['device'];
                     if (class_exists($cls_new)) {
-                        try { (new $cls_new())->add_customer($customer, $newPlan); } catch (Exception $e) {}
+                        try { (new $cls_new())->add_customer($customer, $newPlan); } catch (Throwable $e) {}
                     }
                 }
             }
@@ -361,7 +375,7 @@ switch ($action) {
                 $isChangePlan = true;
                 $cls = $p['device'];
                 if (class_exists($cls)) {
-                    try { (new $cls())->add_customer($c, $p); } catch (Exception $e) {}
+                    try { (new $cls())->add_customer($c, $p); } catch (Throwable $e) {}
                 }
             }
         }
@@ -376,7 +390,9 @@ switch ($action) {
 
     case 'admin_deposit':
         // 100% Mengikuti alur resmi system/controllers/plan.php (case 'deposit-post') & Package::rechargeBalance
+        // + Pengiriman notifikasi Telegram Admin & WhatsApp Pelanggan
         $admin = require_admin_session($api_secret);
+        @set_time_limit(60);
         ensure_official_payment_notif_channel();
 
         $user_id    = (int)(_post('customer_id') ?: _post('id_customer'));
@@ -389,8 +405,10 @@ switch ($action) {
             api_out(false, 'Pelanggan tidak ditemukan.', null, 404);
         }
 
+        $prev_bal = (float)($c['balance'] ?? 0);
+
         if (function_exists('run_hook')) {
-            @run_hook('deposit_customer');
+            try { @run_hook('deposit_customer'); } catch (Throwable $e) {}
         }
 
         $admin_name = $admin['fullname'] ?: $admin['username'];
@@ -399,39 +417,62 @@ switch ($action) {
         $plan_label = 'Balance';
         $price_amt  = 0.0;
 
-        if ($custom_amt != 0) {
-            $plan = [
-                'name_plan' => class_exists('Lang') ? Lang::T('Balance') : 'Balance',
-                'price'     => $custom_amt
-            ];
-            $plan_label = $plan['name_plan'];
-            $price_amt  = $custom_amt;
+        // Tahan sementara notifikasi bawaan di dalam rechargeBalance agar tidak terkirim ganda,
+        // lalu kita kirimkan secara pasti menggunakan Message::sendTelegram & Message::sendWhatsapp di bawah.
+        $orig_notif_pay = $config['user_notification_payment'] ?? 'wa';
+        $orig_tg_bot    = $config['telegram_bot'] ?? '';
+        $config['user_notification_payment'] = 'none';
+        $_c['user_notification_payment']     = 'none';
+        $config['telegram_bot']              = '';
+        $_c['telegram_bot']                  = '';
 
-            if (class_exists('Package') && method_exists('Package', 'rechargeBalance')) {
-                $trxId = (int)Package::rechargeBalance($c, $plan, 'Deposit', $admin_name, $note);
-            }
-        } elseif ($plan_id > 0) {
-            $p = ORM::for_table('tbl_plans')->find_one($plan_id);
-            if (!$p) {
-                api_out(false, 'Paket Saldo tidak ditemukan.', null, 404);
-            }
-            $plan_label = $p['name_plan'];
-            $price_amt  = (float)$p['price'];
+        @ob_start();
+        try {
+            if ($custom_amt != 0) {
+                $plan = [
+                    'name_plan' => class_exists('Lang') ? Lang::T('Balance') : 'Balance',
+                    'price'     => $custom_amt
+                ];
+                $plan_label = $plan['name_plan'];
+                $price_amt  = $custom_amt;
 
-            if (class_exists('Package') && method_exists('Package', 'rechargeBalance')) {
-                $trxId = (int)Package::rechargeBalance($c, $p, 'Deposit', $admin_name, $note);
+                if (class_exists('Package') && method_exists('Package', 'rechargeBalance')) {
+                    $trxId = (int)Package::rechargeBalance($c, $plan, 'Deposit', $admin_name, $note);
+                }
+            } elseif ($plan_id > 0) {
+                $p = ORM::for_table('tbl_plans')->find_one($plan_id);
+                if (!$p) {
+                    @ob_end_clean();
+                    api_out(false, 'Paket Saldo tidak ditemukan.', null, 404);
+                }
+                $plan_label = $p['name_plan'];
+                $price_amt  = (float)$p['price'];
+
+                if (class_exists('Package') && method_exists('Package', 'rechargeBalance')) {
+                    $trxId = (int)Package::rechargeBalance($c, $p, 'Deposit', $admin_name, $note);
+                }
+            } else {
+                @ob_end_clean();
+                api_out(false, 'Pilih paket saldo atau masukkan nominal top-up terlebih dahulu.', null, 400);
             }
-        } else {
-            api_out(false, 'Pilih paket saldo atau masukkan nominal top-up terlebih dahulu.', null, 400);
-        }
+        } catch (Throwable $e) {}
+        @ob_end_clean();
+
+        // Kembalikan konfigurasi Telegram & Notifikasi Pelanggan
+        $config['user_notification_payment']           = $orig_notif_pay;
+        $_c['user_notification_payment']               = $orig_notif_pay;
+        $GLOBALS['config']['user_notification_payment'] = $orig_notif_pay;
+        $GLOBALS['_c']['user_notification_payment']     = $orig_notif_pay;
+
+        $config['telegram_bot']           = $orig_tg_bot;
+        $_c['telegram_bot']               = $orig_tg_bot;
+        $GLOBALS['config']['telegram_bot'] = $orig_tg_bot;
+        $GLOBALS['_c']['telegram_bot']     = $orig_tg_bot;
 
         if ($trxId > 0) {
             $c_fresh = ORM::for_table('tbl_customers')->find_one($user_id);
-            $new_bal = $c_fresh ? (float)$c_fresh['balance'] : ((float)$c['balance'] + $price_amt);
+            $new_bal = $c_fresh ? (float)$c_fresh['balance'] : ($prev_bal + $price_amt);
             $in = ORM::for_table('tbl_transactions')->find_one($trxId);
-
-            write_admin_log($admin, '[' . $admin['username'] . ']: Deposit ' . $c['username'] . ' [' . $plan_label . '][' . $currency . ' ' . number_format($price_amt, 0, ',', '.') . ']');
-            unset($_SESSION['notify'], $_SESSION['ntype']);
 
             $in_arr = $in ? $in->as_array() : [
                 'id' => $trxId, 'invoice' => 'INV-' . $trxId, 'username' => $c['username'],
@@ -440,10 +481,43 @@ switch ($action) {
                 'expiration' => date('Y-m-d'), 'time' => date('H:i:s'),
                 'method' => 'Deposit - ' . $admin_name, 'routers' => 'balance', 'type' => 'Balance'
             ];
-            api_out(true, 'Saldo ' . $c['fullname'] . ' berhasil ditambah menjadi ' . $currency . ' ' . number_format($new_bal, 0, ',', '.'), [
+
+            $receipt = build_web_invoice_receipt($in_arr, $c_fresh ?: $c, $config, $note);
+            $prev_bal_fmt = (class_exists('Lang') && method_exists('Lang', 'moneyFormat'))
+                ? Lang::moneyFormat($prev_bal)
+                : ($currency . ' ' . number_format($prev_bal, 0, ',', '.'));
+
+            write_admin_log($admin, '[' . $admin['username'] . ']: Deposit ' . $c['username'] . ' [' . $plan_label . '][' . $receipt['price_formatted'] . ']');
+            unset($_SESSION['notify'], $_SESSION['ntype']);
+
+            // 1. Kirim Notifikasi Telegram Admin menggunakan Message::sendTelegram() resmi
+            $tg_msg = "#u{$c['username']} {$c['fullname']} #deposit #Balance \n"
+                . "{$plan_label}\n"
+                . "Router: balance\n"
+                . "Gateway: Deposit\n"
+                . "Channel: {$admin_name}\n"
+                . "Previous Balance: {$prev_bal_fmt}\n"
+                . "New Balance: {$receipt['balance_formatted']}\n"
+                . "Price: {$receipt['price_formatted']}\n"
+                . "Note: {$note}";
+            notify_telegram_admin($tg_msg);
+
+            // 2. Kirim Notifikasi WhatsApp / SMS ke Pelanggan menggunakan Message::sendWhatsapp() resmi
+            $cust_phone = trim((string)(($c_fresh ? $c_fresh['phonenumber'] : $c['phonenumber']) ?? ''));
+            $wa_text    = trim((string)($receipt['wa_web_text'] ?? ''));
+            if ($cust_phone !== '' && $wa_text !== '') {
+                $notif_mode = strtolower(trim((string)($config['user_notification_payment'] ?? 'wa')));
+                if ($notif_mode === 'sms') {
+                    notify_sms_customer($cust_phone, $wa_text);
+                } elseif ($notif_mode === 'wa' || !empty($config['wa_url'])) {
+                    notify_whatsapp_customer($cust_phone, $wa_text);
+                }
+            }
+
+            api_out(true, 'Saldo ' . $c['fullname'] . ' berhasil ditambah menjadi ' . $receipt['balance_formatted'], [
                 'balance' => $new_bal,
                 'invoice' => $in_arr,
-                'receipt' => build_web_invoice_receipt($in_arr, $c_fresh ?: $c, $config, $note)
+                'receipt' => $receipt
             ]);
         } else {
             api_out(false, 'Gagal memproses isi ulang saldo pelanggan.', null, 500);
@@ -541,7 +615,7 @@ switch ($action) {
         $config['voucher_prefix'] = $prefix;
 
         if (function_exists('run_hook')) {
-            @run_hook('create_voucher');
+            try { @run_hook('create_voucher'); } catch (Throwable $e) {}
         }
 
         $generated_codes = [];
@@ -601,7 +675,7 @@ switch ($action) {
     case 'admin_voucher_delete':
         require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
         if (function_exists('run_hook')) {
-            @run_hook('delete_voucher');
+            try { @run_hook('delete_voucher'); } catch (Throwable $e) {}
         }
         $id          = (int)_req('id');
         $delete_used = (int)_req('delete_used');
@@ -643,6 +717,7 @@ switch ($action) {
 
     case 'admin_voucher_refill':
         $admin = require_admin_session($api_secret);
+        @set_time_limit(60);
         ensure_official_payment_notif_channel();
 
         $customer_id = (int)(_post('customer_id') ?: _post('id_customer'));
@@ -660,10 +735,19 @@ switch ($action) {
         }
 
         if (function_exists('run_hook')) {
-            @run_hook('refill_customer');
+            try { @run_hook('refill_customer'); } catch (Throwable $e) {}
         }
 
-        if (class_exists('Package') && Package::rechargeUser($user['id'], $v1['routers'], $v1['id_plan'], 'Voucher', $code)) {
+        $ok_refill = false;
+        @ob_start();
+        if (class_exists('Package') && method_exists('Package', 'rechargeUser')) {
+            try {
+                $ok_refill = Package::rechargeUser($user['id'], $v1['routers'], $v1['id_plan'], 'Voucher', $code);
+            } catch (Throwable $e) {}
+        }
+        @ob_end_clean();
+
+        if ($ok_refill) {
             $v1->status    = '1';
             $v1->user      = $user['username'];
             if (array_key_exists('used_date', $v1->as_array())) {
