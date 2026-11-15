@@ -31,6 +31,7 @@ switch ($action) {
 
         $cids = array_column($rows, 'id');
         $rech_map = [];
+        $cf_map   = [];
         if (!empty($cids)) {
             foreach (ORM::for_table('tbl_user_recharges')->where_in('customer_id', $cids)->order_by_desc('id')->find_array() as $r) {
                 $cid = (int)$r['customer_id'];
@@ -38,6 +39,15 @@ switch ($action) {
                     $rech_map[$cid] = $r;
                 }
             }
+            try {
+                foreach (ORM::for_table('tbl_customers_fields')->where_in('customer_id', $cids)->find_array() as $cf) {
+                    $cid = (int)$cf['customer_id'];
+                    $cf_map[$cid][] = [
+                        'name'  => $cf['field_name'] ?? '',
+                        'value' => $cf['field_value'] ?? ''
+                    ];
+                }
+            } catch (Throwable $e) {}
         }
 
         $customers = [];
@@ -61,6 +71,7 @@ switch ($action) {
                 'pppoe_password' => $row['pppoe_password'] ?? '',
                 'pppoe_ip'       => $row['pppoe_ip'] ?? '',
                 'coordinates'    => $row['coordinates'] ?? '',
+                'custom_fields'  => $cf_map[$cid] ?? [],
                 'active_package' => $rech ? [
                     'id'         => (int)$rech['id'],
                     'plan_id'    => (int)$rech['plan_id'],
@@ -82,6 +93,7 @@ switch ($action) {
 
     case 'admin_customer_save':
         $admin = require_admin_session($api_secret);
+        @set_time_limit(60);
         $id = (int)_post('id');
 
         $raw_username   = trim(_post('username'));
@@ -108,9 +120,9 @@ switch ($action) {
         $GLOBALS['zero'] = 0;
 
         if ($id === 0 && function_exists('run_hook')) {
-            @run_hook('add_customer');
+            try { @run_hook('add_customer'); } catch (Throwable $e) {}
         } elseif ($id > 0 && function_exists('run_hook')) {
-            @run_hook('edit_customer');
+            try { @run_hook('edit_customer'); } catch (Throwable $e) {}
         }
 
         $errors = [];
@@ -211,7 +223,7 @@ switch ($action) {
 
         $customerId = (int)$cust->id();
 
-        // Jika Edit Pelanggan dan ada paket berstatus ON, sinkronkan perubahan password/PPPoE ke MikroTik (Sesuai customers.php)
+        // Jika Edit Pelanggan dan ada paket berstatus ON, sinkronkan perubahan password/PPPoE ke MikroTik
         if ($id > 0 && $ppln <= 0 && class_exists('Package') && method_exists('Package', 'getDevice')) {
             $active_turs = ORM::for_table('tbl_user_recharges')->where('customer_id', $customerId)->where('status', 'on')->find_many();
             foreach ($active_turs as $tur) {
@@ -222,7 +234,7 @@ switch ($action) {
                         require_once $dvc_file;
                         $dev_cls = $p_active['device'];
                         if (class_exists($dev_cls)) {
-                            try { (new $dev_cls())->add_customer($cust, $p_active); } catch (Exception $e) {}
+                            try { (new $dev_cls())->add_customer($cust, $p_active); } catch (Throwable $e) {}
                         }
                     }
                 }
@@ -231,6 +243,11 @@ switch ($action) {
 
         $custom_field_names  = isset($_POST['custom_field_name']) ? (array)$_POST['custom_field_name'] : [];
         $custom_field_values = isset($_POST['custom_field_value']) ? (array)$_POST['custom_field_value'] : [];
+        if ($id > 0 && isset($_POST['custom_field_name'])) {
+            try {
+                ORM::for_table('tbl_customers_fields')->where('customer_id', $customerId)->delete_many();
+            } catch (Throwable $e) {}
+        }
         if (!empty($custom_field_values)) {
             $totalFields = min(count($custom_field_names), count($custom_field_values));
             for ($i = 0; $i < $totalFields; $i++) {
@@ -243,7 +260,7 @@ switch ($action) {
                         $customField->field_name  = $cf_name;
                         $customField->field_value = $cf_value;
                         $customField->save();
-                    } catch (Exception $e) {}
+                    } catch (Throwable $e) {}
                 }
             }
         }
@@ -277,7 +294,7 @@ switch ($action) {
                 if ($enable_mail && !empty($cust['email']) && class_exists('Message') && method_exists('Message', 'sendEmail')) {
                     try {
                         Message::sendEmail($cust['email'], $emailSubject, $welcomeMessage, $cust['email']);
-                    } catch (Exception $e) {
+                    } catch (Throwable $e) {
                         write_admin_log($admin, 'Gagal mengirim email welcome message: ' . $e->getMessage());
                     }
                 }
@@ -290,14 +307,20 @@ switch ($action) {
             $cur_notif = strtolower(trim((string)($config['user_notification_payment'] ?? '')));
             if ($cur_notif === '' || $cur_notif === 'none') {
                 if (!empty($config['wa_url'])) {
-                    $config['user_notification_payment'] = 'wa';
-                    $_c['user_notification_payment']     = 'wa';
+                    $config['user_notification_payment']           = 'wa';
+                    $_c['user_notification_payment']               = 'wa';
+                    $GLOBALS['config']['user_notification_payment'] = 'wa';
+                    $GLOBALS['_c']['user_notification_payment']     = 'wa';
                 } elseif (!empty($config['sms_url'])) {
-                    $config['user_notification_payment'] = 'sms';
-                    $_c['user_notification_payment']     = 'sms';
+                    $config['user_notification_payment']           = 'sms';
+                    $_c['user_notification_payment']               = 'sms';
+                    $GLOBALS['config']['user_notification_payment'] = 'sms';
+                    $GLOBALS['_c']['user_notification_payment']     = 'sms';
                 } elseif (!empty($config['smtp_host'])) {
-                    $config['user_notification_payment'] = 'email';
-                    $_c['user_notification_payment']     = 'email';
+                    $config['user_notification_payment']           = 'email';
+                    $_c['user_notification_payment']               = 'email';
+                    $GLOBALS['config']['user_notification_payment'] = 'email';
+                    $GLOBALS['_c']['user_notification_payment']     = 'email';
                 }
             }
 
@@ -323,7 +346,14 @@ switch ($action) {
                 $admin_name = $admin['fullname'] ?: $admin['username'];
 
                 if (class_exists('Package') && method_exists('Package', 'rechargeUser')) {
-                    if (Package::rechargeUser($customerId, $server, $plan['id'], $gateway, $admin_name)) {
+                    $rech_ok = false;
+                    @ob_start();
+                    try {
+                        $rech_ok = Package::rechargeUser($customerId, $server, $plan['id'], $gateway, $admin_name);
+                    } catch (Throwable $e) {}
+                    @ob_end_clean();
+
+                    if ($rech_ok) {
                         $recharged_plan_name = $plan['name_plan'];
                         if ($using_lower === 'balance') {
                             $cost_info = calculate_order_cost($customerId, $plan, $config);
@@ -354,6 +384,7 @@ switch ($action) {
         if (!empty($recharged_plan_name)) {
             $in_last = ORM::for_table('tbl_transactions')->where('username', $cust['username'])->order_by_desc('id')->find_one();
             if ($in_last) {
+                $cust_out['invoice'] = $in_last->as_array();
                 $cust_out['receipt'] = build_web_invoice_receipt($in_last->as_array(), $cust_out, $config);
             }
         }
@@ -368,10 +399,10 @@ switch ($action) {
         if (!$cust) api_out(false, 'Pelanggan tidak ditemukan.', null, 404);
         $uname = $cust['username'];
         if (function_exists('run_hook')) {
-            @run_hook('delete_customer');
+            try { @run_hook('delete_customer'); } catch (Throwable $e) {}
         }
         ORM::for_table('tbl_user_recharges')->where('customer_id', $id)->delete_many();
-        try { ORM::for_table('tbl_customers_fields')->where('customer_id', $id)->delete_many(); } catch (Exception $e) {}
+        try { ORM::for_table('tbl_customers_fields')->where('customer_id', $id)->delete_many(); } catch (Throwable $e) {}
         $cust->delete();
         write_admin_log($admin, 'Menghapus pelanggan: ' . $uname);
         api_out(true, 'Pelanggan ' . $uname . ' berhasil dihapus.');
@@ -396,10 +427,12 @@ switch ($action) {
                         require_once $dvc;
                         $cls = $p['device'];
                         if (class_exists($cls)) {
-                            $inst = new $cls();
-                            if (method_exists($inst, 'sync_customer')) @$inst->sync_customer($c, $p);
-                            elseif (method_exists($inst, 'add_customer')) @$inst->add_customer($c, $p);
-                            $synced++;
+                            try {
+                                $inst = new $cls();
+                                if (method_exists($inst, 'sync_customer')) @$inst->sync_customer($c, $p);
+                                elseif (method_exists($inst, 'add_customer')) @$inst->add_customer($c, $p);
+                                $synced++;
+                            } catch (Throwable $e) {}
                         }
                     }
                 }
@@ -420,10 +453,12 @@ switch ($action) {
                     require_once $dev_file;
                     $d_cls = $plan['device'];
                     if (class_exists($d_cls)) {
-                        $dev = new $d_cls();
-                        if (method_exists($dev, 'sync_customer')) @$dev->sync_customer($cust, $plan);
-                        elseif (method_exists($dev, 'add_customer')) @$dev->add_customer($cust, $plan);
-                        $synced++;
+                        try {
+                            $dev = new $d_cls();
+                            if (method_exists($dev, 'sync_customer')) @$dev->sync_customer($cust, $plan);
+                            elseif (method_exists($dev, 'add_customer')) @$dev->add_customer($cust, $plan);
+                            $synced++;
+                        } catch (Throwable $e) {}
                     }
                 }
             }
