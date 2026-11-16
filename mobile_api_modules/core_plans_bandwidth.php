@@ -6,6 +6,70 @@
 
 global $config, $_c, $admin, $ui, $DEVICE_PATH, $_app_stage, $phpnux_root;
 
+if (!function_exists('get_phpnuxbill_burst_presets')) {
+    /**
+     * Mengambil daftar Burst Preset langsung dari template resmi ui/ui/admin/bandwidth/add.tpl
+     * atau menggunakan daftar resmi PHPNuxBill jika template tidak ditemukan.
+     */
+    function get_phpnuxbill_burst_presets($root_dir) {
+        $presets = [];
+        $tpl_candidates = [
+            $root_dir . '/ui/ui/admin/bandwidth/add.tpl',
+            $root_dir . '/ui/ui_custom/admin/bandwidth/add.tpl'
+        ];
+
+        foreach ($tpl_candidates as $tpl_file) {
+            if (is_file($tpl_file) && is_readable($tpl_file)) {
+                $content = file_get_contents($tpl_file);
+                if (preg_match_all('/autoBurst\(\s*[\'"]([^\'"]+)[\'"]\s*,\s*(\d+)\s*,\s*[\'"]([^\'"]+)[\'"]\s*,\s*(\d+)\s*,\s*[\'"]([^\'"]+)[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)[^>]*>([^<]+)</i', $content, $matches, PREG_SET_ORDER)) {
+                    foreach ($matches as $m) {
+                        $presets[] = [
+                            'label'          => trim(strip_tags($m[11])),
+                            'group'          => (stripos($m[11], '2x') !== false || ((int)$m[2] * 2 === (int)$m[6])) ? '2x' : 'upto',
+                            'name_bw'        => $m[1],
+                            'rate_down'      => (int)$m[2],
+                            'rate_down_unit' => $m[3],
+                            'rate_up'        => (int)$m[4],
+                            'rate_up_unit'   => $m[5],
+                            'burst'          => [$m[6], $m[7], $m[8], $m[9], $m[10]]
+                        ];
+                    }
+                }
+                if (!empty($presets)) {
+                    return $presets;
+                }
+            }
+        }
+
+        // Daftar Preset Resmi Web PHPNuxBill (2x Speed & UpTo +1M)
+        return [
+            // Kategori 2x Speed
+            ['label' => '1M 2x',  'group' => '2x', 'rate_down' => 1,  'rate_down_unit' => 'Mbps', 'rate_up' => 1,  'rate_up_unit' => 'Mbps', 'burst' => ['2M/2M', '768k/768k', '16/16', '8', '512k/512k']],
+            ['label' => '2M 2x',  'group' => '2x', 'rate_down' => 2,  'rate_down_unit' => 'Mbps', 'rate_up' => 2,  'rate_up_unit' => 'Mbps', 'burst' => ['4M/4M', '1536k/1536k', '16/16', '8', '1M/1M']],
+            ['label' => '3M 2x',  'group' => '2x', 'rate_down' => 3,  'rate_down_unit' => 'Mbps', 'rate_up' => 3,  'rate_up_unit' => 'Mbps', 'burst' => ['6M/6M', '2304k/2304k', '16/16', '8', '1536k/1536k']],
+            ['label' => '4M 2x',  'group' => '2x', 'rate_down' => 4,  'rate_down_unit' => 'Mbps', 'rate_up' => 4,  'rate_up_unit' => 'Mbps', 'burst' => ['8M/8M', '3M/3M', '16/16', '8', '2M/2M']],
+            ['label' => '5M 2x',  'group' => '2x', 'rate_down' => 5,  'rate_down_unit' => 'Mbps', 'rate_up' => 5,  'rate_up_unit' => 'Mbps', 'burst' => ['10M/10M', '3840k/3840k', '16/16', '8', '2560k/2560k']],
+            ['label' => '6M 2x',  'group' => '2x', 'rate_down' => 6,  'rate_down_unit' => 'Mbps', 'rate_up' => 6,  'rate_up_unit' => 'Mbps', 'burst' => ['12M/12M', '4608k/4608k', '16/16', '8', '3M/3M']],
+            ['label' => '7M 2x',  'group' => '2x', 'rate_down' => 7,  'rate_down_unit' => 'Mbps', 'rate_up' => 7,  'rate_up_unit' => 'Mbps', 'burst' => ['14M/14M', '5376k/5376k', '16/16', '8', '3584k/3584k']],
+            ['label' => '8M 2x',  'group' => '2x', 'rate_down' => 8,  'rate_down_unit' => 'Mbps', 'rate_up' => 8,  'rate_up_unit' => 'Mbps', 'burst' => ['16M/16M', '6M/6M', '16/16', '8', '4M/4M']],
+            ['label' => '9M 2x',  'group' => '2x', 'rate_down' => 9,  'rate_down_unit' => 'Mbps', 'rate_up' => 9,  'rate_up_unit' => 'Mbps', 'burst' => ['18M/18M', '6912k/6912k', '16/16', '8', '4608k/4608k']],
+            ['label' => '10M 2x', 'group' => '2x', 'rate_down' => 10, 'rate_down_unit' => 'Mbps', 'rate_up' => 10, 'rate_up_unit' => 'Mbps', 'burst' => ['20M/20M', '7680k/7680k', '16/16', '8', '5M/5M']],
+
+            // Kategori UpTo (+1M)
+            ['label' => '512k upto 1M', 'group' => 'upto', 'rate_down' => 512, 'rate_down_unit' => 'Kbps', 'rate_up' => 512, 'rate_up_unit' => 'Kbps', 'burst' => ['1024k/1024k', '384k/384k', '16/16', '8', '256k/256k']],
+            ['label' => '1M upto 2M',   'group' => 'upto', 'rate_down' => 1,   'rate_down_unit' => 'Mbps', 'rate_up' => 1,   'rate_up_unit' => 'Mbps', 'burst' => ['2M/2M', '768k/768k', '16/16', '8', '512k/512k']],
+            ['label' => '2M upto 3M',   'group' => 'upto', 'rate_down' => 2,   'rate_down_unit' => 'Mbps', 'rate_up' => 2,   'rate_up_unit' => 'Mbps', 'burst' => ['3M/3M', '1536k/1536k', '12/12', '8', '1024k/1024k']],
+            ['label' => '3M upto 4M',   'group' => 'upto', 'rate_down' => 3,   'rate_down_unit' => 'Mbps', 'rate_up' => 3,   'rate_up_unit' => 'Mbps', 'burst' => ['4M/4M', '2450k/2450k', '10/10', '8', '1536k/1536k']],
+            ['label' => '4M upto 5M',   'group' => 'upto', 'rate_down' => 4,   'rate_down_unit' => 'Mbps', 'rate_up' => 4,   'rate_up_unit' => 'Mbps', 'burst' => ['5M/5M', '3M/3M', '10/10', '8', '2M/2M']],
+            ['label' => '5M upto 6M',   'group' => 'upto', 'rate_down' => 5,   'rate_down_unit' => 'Mbps', 'rate_up' => 5,   'rate_up_unit' => 'Mbps', 'burst' => ['6M/6M', '3680k/3680k', '10/10', '8', '2450k/2450k']],
+            ['label' => '6M upto 7M',   'group' => 'upto', 'rate_down' => 6,   'rate_down_unit' => 'Mbps', 'rate_up' => 6,   'rate_up_unit' => 'Mbps', 'burst' => ['7M/7M', '4560k/4560k', '11/11', '8', '3M/3M']],
+            ['label' => '7M upto 8M',   'group' => 'upto', 'rate_down' => 7,   'rate_down_unit' => 'Mbps', 'rate_up' => 7,   'rate_up_unit' => 'Mbps', 'burst' => ['8M/8M', '5460k/5460k', '12/12', '8', '3640k/3640k']],
+            ['label' => '8M upto 9M',   'group' => 'upto', 'rate_down' => 8,   'rate_down_unit' => 'Mbps', 'rate_up' => 8,   'rate_up_unit' => 'Mbps', 'burst' => ['9M/9M', '6M/6M', '12/12', '8', '4M/4M']],
+            ['label' => '9M upto 10M',  'group' => 'upto', 'rate_down' => 9,   'rate_down_unit' => 'Mbps', 'rate_up' => 9,   'rate_up_unit' => 'Mbps', 'burst' => ['10M/10M', '6820k/6820k', '12/12', '8', '4550k/4550k']]
+        ];
+    }
+}
+
 switch ($action) {
     // =========================================================================
     // PAKET INTERNET, BANDWIDTH, ROUTERS & DAFTAR PAYMENT USINGS
@@ -132,6 +196,8 @@ switch ($action) {
             'plans'          => $plans,
             'usings'         => $usings,
             'bandwidths'     => $bw_rows,
+            'rate_units'     => ['Kbps', 'Mbps'],
+            'burst_presets'  => get_phpnuxbill_burst_presets($root_dir),
             'devices'        => $devices,
             'plan_types'     => ['Personal', 'Business'],
             'typebps'        => ['Unlimited', 'Limited'],
@@ -430,7 +496,12 @@ switch ($action) {
         if (function_exists('run_hook')) {
             try { @run_hook('view_list_bandwidth'); } catch (Throwable $e) {}
         }
-        $rows = ORM::for_table('tbl_bandwidth')->order_by_desc('id')->find_array();
+        $name_search = trim(_req('name') ?: _req('search'));
+        $query = ORM::for_table('tbl_bandwidth');
+        if ($name_search !== '') {
+            $query->where_like('name_bw', '%' . $name_search . '%');
+        }
+        $rows = $query->order_by_desc('id')->find_array();
         foreach ($rows as &$r) {
             $r['burst_parts'] = !empty($r['burst']) ? explode(' ', trim($r['burst'])) : [];
         }
@@ -438,70 +509,98 @@ switch ($action) {
         api_out(true, 'Daftar bandwidth dimuat', $rows);
         break;
 
+    // =========================================================================
+    // SIMPAN BANDWIDTH (100% Mengikuti system/controllers/bandwidth.php)
+    // =========================================================================
     case 'admin_bandwidth_save':
         $admin = require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
         $id             = (int)_post('id');
         $is_edit        = ($id > 0);
-        $name           = trim(_post('name_bw') ?: _post('name'));
-        $rate_down      = (int)_post('rate_down');
+        $name           = trim(_post('name') ?: _post('name_bw'));
+        $rate_down      = _post('rate_down');
         $rate_down_unit = (_post('rate_down_unit') === 'Kbps') ? 'Kbps' : 'Mbps';
-        $rate_up        = (int)_post('rate_up');
+        $rate_up        = _post('rate_up');
         $rate_up_unit   = (_post('rate_up_unit') === 'Kbps') ? 'Kbps' : 'Mbps';
 
         if (function_exists('run_hook')) {
             try { @run_hook($is_edit ? 'edit_bandwidth' : 'add_bandwidth'); } catch (Throwable $e) {}
         }
 
-        if ($name === '' || strlen($name) > 255) {
-            api_out(false, 'Name should be between 1 to 255 characters', null, 400);
-        }
-        if ($rate_down <= 0 || $rate_up <= 0) {
-            api_out(false, 'Rate Download dan Upload harus lebih dari 0.', null, 400);
-        }
+        // Mengikuti logika $_POST['burst'] pada bandwidth.php (5 elemen wajib tidak kosong)
+        $isBurst = true;
+        $burst = "";
+        $burst_input = $_POST['burst'] ?? null;
 
-        $burst = '';
-        if (isset($_POST['burst']) && is_array($_POST['burst'])) {
-            $isBurst = true;
-            foreach ($_POST['burst'] as $b) {
-                if (empty(trim((string)$b))) {
-                    $isBurst = false;
-                }
-            }
-            if ($isBurst) {
-                $burst = implode(' ', array_map('trim', $_POST['burst']));
-            }
-        } else {
+        if (!is_array($burst_input)) {
             $b_limit     = trim((string)_post('burst_limit'));
             $b_threshold = trim((string)_post('burst_threshold'));
             $b_time      = trim((string)_post('burst_time'));
             $b_priority  = trim((string)_post('burst_priority'));
             $b_limit_at  = trim((string)_post('burst_limit_at'));
 
-            if ($b_limit !== '' && $b_threshold !== '' && $b_time !== '' && $b_priority !== '') {
-                $parts = [$b_limit, $b_threshold, $b_time, $b_priority];
-                if ($b_limit_at !== '') $parts[] = $b_limit_at;
-                $burst = implode(' ', $parts);
-            } else {
-                $burst = trim((string)_post('burst'));
+            if ($b_limit !== '' || $b_threshold !== '' || $b_time !== '' || $b_priority !== '' || $b_limit_at !== '') {
+                $burst_input = [$b_limit, $b_threshold, $b_time, $b_priority, $b_limit_at];
             }
+        }
+
+        if (is_array($burst_input)) {
+            foreach ($burst_input as $b) {
+                if (empty(trim((string)$b))) {
+                    $isBurst = false;
+                }
+            }
+            if ($isBurst) {
+                $burst = implode(' ', array_map('trim', $burst_input));
+            }
+        }
+
+        $msg = '';
+        if (class_exists('Validator') && method_exists('Validator', 'Length')) {
+            if (Validator::Length($name, 256, 0) == false) {
+                $msg .= 'Name should be between 1 to 255 characters' . "\n";
+            }
+        } elseif ($name === '' || strlen($name) > 255) {
+            $msg .= 'Name should be between 1 to 255 characters' . "\n";
+        }
+
+        if ((float)$rate_down <= 0 || (float)$rate_up <= 0) {
+            $msg .= (class_exists('Lang') ? Lang::T('All field is required') : 'Rate Download dan Rate Upload wajib diisi.') . "\n";
+        }
+
+        // Konversi unit rate sesuai bandwidth.php
+        if ($rate_down_unit == 'Kbps') {
+            $unit_rate_down = (float)$rate_down * 1024;
+        } else {
+            $unit_rate_down = (float)$rate_down * 1048576;
+        }
+        if ($rate_up_unit == 'Kbps') {
+            $unit_rate_up = (float)$rate_up * 1024;
+        } else {
+            $unit_rate_up = (float)$rate_up * 1048576;
         }
 
         if ($is_edit) {
             $d = ORM::for_table('tbl_bandwidth')->find_one($id);
             if (!$d) {
-                api_out(false, class_exists('Lang') ? Lang::T('Data Not Found') : 'Data Bandwidth tidak ditemukan.', null, 404);
-            }
-            if ($d['name_bw'] !== $name) {
+                $msg .= (class_exists('Lang') ? Lang::T('Data Not Found') : 'Data Not Found') . "\n";
+            } elseif ($d['name_bw'] != $name) {
                 $c = ORM::for_table('tbl_bandwidth')->where('name_bw', $name)->find_one();
                 if ($c) {
-                    api_out(false, class_exists('Lang') ? Lang::T('Name Bandwidth Already Exist') : 'Nama Bandwidth sudah digunakan.', null, 400);
+                    $msg .= (class_exists('Lang') ? Lang::T('Name Bandwidth Already Exist') : 'Name Bandwidth Already Exist') . "\n";
                 }
             }
         } else {
-            $c = ORM::for_table('tbl_bandwidth')->where('name_bw', $name)->find_one();
-            if ($c) {
-                api_out(false, class_exists('Lang') ? Lang::T('Name Bandwidth Already Exist') : 'Nama Bandwidth sudah terdaftar.', null, 400);
+            $d = ORM::for_table('tbl_bandwidth')->where('name_bw', $name)->find_one();
+            if ($d) {
+                $msg .= (class_exists('Lang') ? Lang::T('Name Bandwidth Already Exist') : 'Name Bandwidth Already Exist') . "\n";
             }
+        }
+
+        if (trim($msg) !== '') {
+            api_out(false, trim($msg), null, 400);
+        }
+
+        if (!$is_edit) {
             $d = ORM::for_table('tbl_bandwidth')->create();
         }
 
@@ -513,25 +612,29 @@ switch ($action) {
         $d->burst          = $burst;
         $d->save();
 
+        $saved_arr = $d->as_array();
+        $saved_arr['burst_parts'] = !empty($burst) ? explode(' ', $burst) : [];
         write_admin_log($admin, ($is_edit ? 'Mengubah' : 'Menambah') . ' Bandwidth: ' . $name);
         api_out(
             true,
-            class_exists('Lang') ? Lang::T($is_edit ? 'Data Updated Successfully' : 'Data Created Successfully') : ('Bandwidth ' . $name . ' berhasil disimpan.'),
-            $d->as_array()
+            class_exists('Lang') ? Lang::T($is_edit ? 'Data Updated Successfully' : 'Data Created Successfully') : 'Data Saved Successfully',
+            $saved_arr
         );
         break;
 
     case 'admin_bandwidth_delete':
-        require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
+        $admin = require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
         $id = (int)_req('id');
         if (function_exists('run_hook')) {
             try { @run_hook('delete_bandwidth'); } catch (Throwable $e) {}
         }
-        $bw = ORM::for_table('tbl_bandwidth')->find_one($id);
-        if (!$bw) {
-            api_out(false, class_exists('Lang') ? Lang::T('Account Not Found') : 'Bandwidth tidak ditemukan.', null, 404);
+        $d = ORM::for_table('tbl_bandwidth')->find_one($id);
+        if (!$d) {
+            api_out(false, class_exists('Lang') ? Lang::T('Account Not Found') : 'Account Not Found', null, 404);
         }
-        $bw->delete();
-        api_out(true, class_exists('Lang') ? Lang::T('Data Deleted Successfully') : 'Bandwidth berhasil dihapus.');
+        $bw_name = $d['name_bw'];
+        $d->delete();
+        write_admin_log($admin, 'Menghapus Bandwidth: ' . $bw_name);
+        api_out(true, class_exists('Lang') ? Lang::T('Data Deleted Successfully') : 'Data Deleted Successfully');
         break;
 }
