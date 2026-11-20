@@ -1,26 +1,34 @@
 <?php
+
 /**
  * PHPNuxBill Mobile API Plugin - Customer Mobile App Portal Module
  * Path: system/plugin/mobile_api_modules/customer_portal_api.php
- */
+ **/
+
+global $config, $_c, $user, $PAYMENTGATEWAY_PATH, $routes, $_app_stage, $api_secret;
 
 switch ($action) {
     // =========================================================================
-    // ENDPOINT APK PELANGGAN (MENGGUNAKAN FUNGSI ASLI VERSI WEB & SYSTEM/API.PHP)
+    // 1. AUTENTIKASI PELANGGAN
     // =========================================================================
     case 'login':
-        $username = trim(_post('username'));
-        $password = _post('password');
-
-        if (empty($username) || empty($password)) {
+        $username = trim((string) _post('username'));
+        $password = (string) _post('password');
+        if ($username === '' || $password === '') {
             api_out(false, class_exists('Lang') ? Lang::T('Enter username and password') : 'Username dan Password wajib diisi.', null, 400);
+        }
+
+        if (function_exists('run_hook')) {
+            try {
+                @run_hook('customer_login');
+            } catch (Throwable $e) {
+            }
         }
 
         $user = ORM::for_table('tbl_customers')->where('username', $username)->find_one();
         if (!$user || !check_user_password($password, $user['password'])) {
             api_out(false, class_exists('Lang') ? Lang::T('Invalid Username or Password') : 'Username atau Password salah.', null, 401);
         }
-
         if (!empty($user['status']) && $user['status'] !== 'Active') {
             api_out(false, (class_exists('Lang') ? Lang::T('This account status') : 'Status akun Anda') . ': ' . $user['status'], null, 403);
         }
@@ -29,24 +37,40 @@ switch ($action) {
         $user->save();
         $_SESSION['uid'] = $user['id'];
         if (class_exists('User') && method_exists('User', 'setCookie')) {
-            @User::setCookie($user['id']);
+            try {
+                @User::setCookie($user['id']);
+            } catch (Throwable $e) {
+            }
         }
         if (function_exists('_log')) {
-            @_log($username . ' ' . (class_exists('Lang') ? Lang::T('Login Successful') : 'Login Successful'), 'User', $user['id']);
+            try {
+                @_log($username . ' ' . (class_exists('Lang') ? Lang::T('Login Successful') : 'Login Successful'), 'User', $user['id']);
+            } catch (Throwable $e) {
+            }
         }
 
         $native_token = create_native_token('c', $user['id'], $api_secret);
+        $comp_name    = !empty($config['CompanyName']) ? $config['CompanyName'] : 'PHPNuxBill';
+        $curr_code    = !empty($config['currency_code']) ? $config['currency_code'] : 'Rp.';
+
         api_out(true, class_exists('Lang') ? Lang::T('Login Successful') : 'Login berhasil', [
-            'token'        => $native_token,
-            'native_token' => $native_token
+            'token'         => $native_token,
+            'native_token'  => $native_token,
+            'company_name'  => $comp_name,
+            'currency_code' => $curr_code
         ]);
         break;
 
+    // =========================================================================
+    // 2. BERANDA PELANGGAN (PAKET AKTIF, AUTO-RENEWAL SALDO & TAGIHAN AKTIF)
+    // =========================================================================
     case 'dashboard':
         $user = require_customer_session($api_secret);
         if (class_exists('User') && method_exists('User', '_info')) {
             $u_info = User::_info($user['id']);
-            if ($u_info) $user = $u_info;
+            if ($u_info) {
+                $user = $u_info;
+            }
         }
 
         $recharges = [];
@@ -54,27 +78,30 @@ switch ($action) {
             $bills = User::_billing($user['id']);
             if ($bills) {
                 foreach ($bills as $b) {
-                    $recharges[] = ($b instanceof ORM) ? $b->as_array() : (array)$b;
+                    $recharges[] = ($b instanceof ORM) ? $b->as_array() : (array) $b;
                 }
             }
         } else {
             $recharges = ORM::for_table('tbl_user_recharges')->where('customer_id', $user['id'])->order_by_desc('id')->find_array();
         }
 
+        // Periksa perpanjangan otomatis menggunakan Saldo jika paket baru saja kedaluwarsa
         foreach ($recharges as &$b_item) {
             if ($b_item['status'] === 'on' && !empty($b_item['expiration']) && time() > strtotime($b_item['expiration'] . ' ' . ($b_item['time'] ?: '23:59:59'))) {
                 $ur_obj = ORM::for_table('tbl_user_recharges')->find_one($b_item['id']);
-                if ($ur_obj) {
-                    if (($config['enable_balance'] ?? 'no') === 'yes' && (int)$user['auto_renewal'] === 1 && class_exists('Package')) {
-                        $plan_info = ORM::for_table('tbl_plans')->find_one($ur_obj['plan_id']);
-                        if ($plan_info && (int)$plan_info['enabled'] === 1 && (float)$user['balance'] >= (float)$plan_info['price']) {
-                            if (@Package::rechargeUser($user['id'], $plan_info['routers'], $plan_info['id'], 'Customer', 'Balance')) {
-                                if (class_exists('Balance')) Balance::min($user['id'], $plan_info['price']);
-                                $user = ORM::for_table('tbl_customers')->find_one($user['id']);
-                                $ur_fresh = ORM::for_table('tbl_user_recharges')->find_one($b_item['id']);
-                                if ($ur_fresh) $b_item = $ur_fresh->as_array();
-                                continue;
+                if ($ur_obj && ($config['enable_balance'] ?? 'no') === 'yes' && (int) ($user['auto_renewal'] ?? 0) === 1 && class_exists('Package')) {
+                    $plan_info = ORM::for_table('tbl_plans')->find_one($ur_obj['plan_id']);
+                    if ($plan_info && (int) $plan_info['enabled'] === 1 && (float) $user['balance'] >= (float) $plan_info['price']) {
+                        if (@Package::rechargeUser($user['id'], $plan_info['routers'], $plan_info['id'], 'Customer', 'Balance')) {
+                            if (class_exists('Balance') && method_exists('Balance', 'min')) {
+                                Balance::min($user['id'], $plan_info['price']);
                             }
+                            $user     = ORM::for_table('tbl_customers')->find_one($user['id']);
+                            $ur_fresh = ORM::for_table('tbl_user_recharges')->find_one($b_item['id']);
+                            if ($ur_fresh) {
+                                $b_item = $ur_fresh->as_array();
+                            }
+                            continue;
                         }
                     }
                 }
@@ -87,37 +114,39 @@ switch ($action) {
             ->order_by_desc('id')
             ->limit(15)
             ->find_many();
-
         $unpaid_bills  = [];
         $order_history = [];
         foreach ($pg_rows as $pr) {
             $parsed = parse_qris_trx($pr, $config);
             if ($parsed) {
                 $order_history[] = $parsed;
-                if ((int)$parsed['status'] === 1) {
+                if ((int) $parsed['status'] === 1) {
                     $unpaid_bills[] = $parsed;
                 }
             }
         }
 
+        $comp_name = !empty($config['CompanyName']) ? $config['CompanyName'] : 'PHPNuxBill';
+        $curr_code = !empty($config['currency_code']) ? $config['currency_code'] : 'Rp.';
+
         api_out(true, 'Data beranda dimuat', [
             'company' => [
-                'name'           => $config['CompanyName'] ?? 'Arneta.ID',
+                'name'           => $comp_name,
                 'phone'          => $config['phone'] ?? '',
                 'address'        => $config['address'] ?? '',
-                'currency'       => $config['currency_code'] ?? 'Rp',
+                'currency'       => $curr_code,
                 'enable_balance' => ($config['enable_balance'] ?? 'yes') === 'yes'
             ],
             'customer' => [
-                'id'           => (int)$user['id'],
+                'id'           => (int) $user['id'],
                 'username'     => $user['username'],
                 'fullname'     => $user['fullname'],
                 'phonenumber'  => $user['phonenumber'],
                 'email'        => $user['email'],
                 'address'      => $user['address'],
-                'balance'      => (float)$user['balance'],
+                'balance'      => (float) $user['balance'],
                 'service_type' => $user['service_type'] ?: 'Others',
-                'auto_renewal' => (int)$user['auto_renewal']
+                'auto_renewal' => (int) ($user['auto_renewal'] ?? 0)
             ],
             'payment_gateways' => get_active_gateways($config),
             'active_packages'  => $recharges,
@@ -127,29 +156,29 @@ switch ($action) {
         ]);
         break;
 
+    // =========================================================================
+    // 3. DAFTAR PAKET INTERNET & TOP-UP SALDO
+    // =========================================================================
     case 'plans':
-        $user = require_customer_session($api_secret);
-        $cust_type = strtoupper(trim($user['service_type'] ?: 'OTHERS'));
-
-        $plans = ORM::for_table('tbl_plans')
+        $user      = require_customer_session($api_secret);
+        $cust_type = strtoupper(trim((string) ($user['service_type'] ?: 'OTHERS')));
+        $plans     = ORM::for_table('tbl_plans')
             ->where('enabled', 1)
             ->order_by_asc('price')
             ->find_array();
 
         $internet_plans = [];
         $balance_plans  = [];
-
         foreach ($plans as $p) {
-            $p_type  = strtoupper(trim($p['type']));
-            $prepaid = strtolower(trim($p['prepaid'] ?? 'yes'));
-
-            $item = [
-                'id'        => (int)$p['id'],
+            $p_type  = strtoupper(trim((string) $p['type']));
+            $prepaid = strtolower(trim((string) ($p['prepaid'] ?? 'yes')));
+            $item    = [
+                'id'        => (int) $p['id'],
                 'name_plan' => $p['name_plan'],
-                'price'     => (float)$p['price'],
+                'price'     => (float) $p['price'],
                 'type'      => ($p_type === 'PPPOE') ? 'PPPoE' : (($p_type === 'HOTSPOT') ? 'Hotspot' : $p['type']),
                 'prepaid'   => $p['prepaid'],
-                'enabled'   => (int)$p['enabled'],
+                'enabled'   => (int) $p['enabled'],
                 'validity'  => $p['validity'] . ' ' . $p['validity_unit'],
                 'routers'   => $p['routers']
             ];
@@ -160,11 +189,9 @@ switch ($action) {
                 }
                 continue;
             }
-
             if ($p_type === 'HOTSPOT' && $prepaid === 'no') {
                 continue;
             }
-
             if ($cust_type === 'HOTSPOT' && $p_type === 'HOTSPOT') {
                 $internet_plans[] = $item;
             } elseif ($cust_type === 'PPPOE' && $p_type === 'PPPOE') {
@@ -183,9 +210,12 @@ switch ($action) {
         ]);
         break;
 
+    // =========================================================================
+    // 4. RIWAYAT TRANSAKSI, AUTO-RENEWAL & AKTIVASI VOUCHER MANDIRI
+    // =========================================================================
     case 'transactions':
         $user = require_customer_session($api_secret);
-        $trx = ORM::for_table('tbl_transactions')
+        $trx  = ORM::for_table('tbl_transactions')
             ->where('username', $user['username'])
             ->order_by_desc('id')
             ->limit(30)
@@ -194,18 +224,20 @@ switch ($action) {
         break;
 
     case 'toggle_renewal':
-        $user = require_customer_session($api_secret);
+        $user               = require_customer_session($api_secret);
         $user->auto_renewal = ($user->auto_renewal == 1) ? 0 : 1;
         $user->save();
-        api_out(true, 'Status perpanjangan otomatis diubah.', ['auto_renewal' => (int)$user->auto_renewal]);
+        api_out(true, 'Status perpanjangan otomatis diubah.', ['auto_renewal' => (int) $user->auto_renewal]);
         break;
 
     case 'redeem_voucher':
-        $user = require_customer_session($api_secret);
-        $raw_code = trim(_post('code'));
-        $code = function_exists('alphanumeric') ? alphanumeric($raw_code, "-_.,") : $raw_code;
+        $user     = require_customer_session($api_secret);
+        $raw_code = trim((string) _post('code'));
+        $code     = (class_exists('Text') && method_exists('Text', 'alphanumeric'))
+            ? Text::alphanumeric($raw_code, "-_.,")
+            : (function_exists('alphanumeric') ? alphanumeric($raw_code, "-_.,") : $raw_code);
 
-        if (empty($code)) {
+        if ($code === '') {
             api_out(false, class_exists('Lang') ? Lang::T('Voucher Not Valid') : 'Kode voucher tidak boleh kosong.', null, 400);
         }
 
@@ -215,16 +247,22 @@ switch ($action) {
             ->find_one();
 
         if (function_exists('run_hook')) {
-            @run_hook('customer_activate_voucher');
+            try {
+                @run_hook('customer_activate_voucher');
+            } catch (Throwable $e) {
+            }
         }
 
+        // Fallback: cek voucher yang dibuat langsung di RouterOS Hotspot
         if (!$v1) {
             $is_registered_cust = ORM::for_table('tbl_customers')->where('username', $code)->find_one();
             if (!$is_registered_cust) {
                 $routers = ORM::for_table('tbl_routers')->where('enabled', 1)->find_many();
                 foreach ($routers as $r) {
                     $client = connect_ros($r['ip_address'], $r['username'], $r['password']);
-                    if (!$client) continue;
+                    if (!$client) {
+                        continue;
+                    }
                     try {
                         $print_req = new PEAR2\Net\RouterOS\Request('/ip/hotspot/user/print');
                         $print_req->setQuery(PEAR2\Net\RouterOS\Query::where('name', $code));
@@ -232,13 +270,11 @@ switch ($action) {
                         foreach ($resp as $item) {
                             if ($item->getType() === PEAR2\Net\RouterOS\Response::TYPE_DATA) {
                                 $ros_id  = $item->getProperty('.id');
-                                $profile = trim($item->getProperty('profile') ?: '');
+                                $profile = trim((string) ($item->getProperty('profile') ?: ''));
                                 $uptime  = $item->getProperty('uptime') ?: '0s';
-
-                                if ($uptime !== '0s' && $uptime !== '00:00:00' && (int)$item->getProperty('bytes-in') > 0) {
+                                if ($uptime !== '0s' && $uptime !== '00:00:00' && (int) $item->getProperty('bytes-in') > 0) {
                                     api_out(false, 'Voucher MikroTik tersebut sudah pernah digunakan.', null, 400);
                                 }
-
                                 $plan = ORM::for_table('tbl_plans')
                                     ->where('name_plan', $profile)
                                     ->where('routers', $r['name'])
@@ -246,15 +282,13 @@ switch ($action) {
                                 if (!$plan) {
                                     $plan = ORM::for_table('tbl_plans')->where('name_plan', $profile)->find_one();
                                 }
-
                                 if ($plan) {
                                     if (!empty($ros_id) && $code !== $user['username']) {
                                         $rem_req = new PEAR2\Net\RouterOS\Request('/ip/hotspot/user/remove');
                                         $rem_req->setArgument('numbers', $ros_id);
                                         @$client->sendSync($rem_req);
                                     }
-
-                                    $v1 = ORM::for_table('tbl_voucher')->create();
+                                    $v1               = ORM::for_table('tbl_voucher')->create();
                                     $v1->type         = 'Hotspot';
                                     $v1->routers      = $r['name'];
                                     $v1->id_plan      = $plan['id'];
@@ -267,42 +301,48 @@ switch ($action) {
                                 }
                             }
                         }
-                    } catch (Exception $e) {}
+                    } catch (Throwable $e) {
+                    }
                 }
             }
         }
 
         if ($v1) {
-            if (class_exists('Package') && Package::rechargeUser($user['id'], $v1['routers'], $v1['id_plan'], "Voucher", $code)) {
-                $v1->status    = "1";
-                $v1->used_date = date('Y-m-d H:i:s');
-                $v1->user      = $user['username'];
+            if (class_exists('Package') && Package::rechargeUser($user['id'], $v1['routers'], $v1['id_plan'], 'Voucher', $code)) {
+                $v1->status = '1';
+                $v1->user   = $user['username'];
+                if (array_key_exists('used_date', $v1->as_array())) {
+                    $v1->used_date = date('Y-m-d H:i:s');
+                }
                 $v1->save();
                 unset($_SESSION['notify'], $_SESSION['ntype']);
                 api_out(true, class_exists('Lang') ? Lang::T('Activation Vouchers Successfully') : 'Voucher berhasil diaktifkan!');
             } else {
-                api_out(false, "Failed to refill account", null, 500);
+                api_out(false, 'Failed to refill account', null, 500);
             }
-        } else {
-            api_out(false, class_exists('Lang') ? Lang::T('Voucher Not Valid') : 'Kode voucher tidak ditemukan atau sudah terpakai.', null, 404);
         }
+
+        api_out(false, class_exists('Lang') ? Lang::T('Voucher Not Valid') : 'Kode voucher tidak ditemukan atau sudah terpakai.', null, 404);
         break;
 
+    // =========================================================================
+    // 5. PEMBELIAN PAKET / TOP-UP SALDO (VIA SALDO ATAU PAYMENT GATEWAY)
+    // =========================================================================
     case 'buy':
     case 'qris_buy':
-        global $PAYMENTGATEWAY_PATH, $routes;
         $pg_dir = !empty($PAYMENTGATEWAY_PATH) ? $PAYMENTGATEWAY_PATH : 'system/paymentgateway';
-
-        $user = require_customer_session($api_secret);
+        $user   = require_customer_session($api_secret);
         if (!empty($user['status']) && $user['status'] !== 'Active') {
             api_out(false, (class_exists('Lang') ? Lang::T('This account status') : 'Status akun') . ' : ' . $user['status'], null, 403);
         }
 
-        $plan_id = (int)_post('plan_id');
-        $gateway = trim(_post('gateway') ?: _post('method'));
-        $discount = (float)(_post('discount') ?: 0);
-        $channel_choice = trim(_post('channel') ?: _post('payment_channel') ?: '');
+        $plan_id        = (int) _post('plan_id');
+        $gateway        = trim((string) (_post('gateway') ?: _post('method')));
+        $coupon_code    = strtoupper(trim((string) (_post('coupon_code') ?: _post('coupon'))));
+        $discount       = 0.0;
+        $applied_coupon = null;
 
+        $channel_choice = trim((string) (_post('channel') ?: _post('payment_channel') ?: ''));
         if (strpos($gateway, ':') !== false) {
             list($gateway, $channel_choice) = explode(':', $gateway, 2);
         }
@@ -312,43 +352,78 @@ switch ($action) {
             api_out(false, class_exists('Lang') ? Lang::T('Plan Not found') : 'Paket tidak ditemukan.', null, 404);
         }
 
-        $cost_info  = calculate_order_cost($user['id'], $plan, $config);
-        $total_cost = max(0, $cost_info['total_cost'] - $discount);
+        $cost_info = calculate_order_cost($user['id'], $plan, $config);
 
-        if ($gateway === 'balance') {
+        // Validasi kupon promo di sisi server (tbl_coupons)
+        if ($coupon_code !== '') {
+            ensure_custom_tables();
+            $cp = ORM::for_table('tbl_coupons')->where('code', $coupon_code)->where('status', 'active')->find_one();
+            if (!$cp) {
+                api_out(false, 'Kode kupon tidak ditemukan atau tidak aktif.', null, 400);
+            }
+            $today_str = date('Y-m-d');
+            if (!empty($cp['start_date']) && $today_str < $cp['start_date']) {
+                api_out(false, 'Kupon promo belum memasuki masa berlaku.', null, 400);
+            }
+            $exp_d = !empty($cp['end_date']) ? $cp['end_date'] : ($cp['expired_date'] ?? '');
+            if ($exp_d !== '' && $today_str > $exp_d) {
+                api_out(false, 'Kupon promo sudah kedaluwarsa.', null, 400);
+            }
+            if ((int) $cp['max_usage'] > 0 && (int) $cp['usage_count'] >= (int) $cp['max_usage']) {
+                api_out(false, 'Kuota penggunaan kupon ini sudah habis.', null, 400);
+            }
+            if ((float) $cp['min_order_amount'] > 0 && (float) $cost_info['total_cost'] < (float) $cp['min_order_amount']) {
+                api_out(false, 'Minimal transaksi untuk kupon ini adalah Rp ' . number_format((float) $cp['min_order_amount'], 0, ',', '.'), null, 400);
+            }
+
+            if ($cp['type'] === 'percent') {
+                $discount = round(((float) $cost_info['total_cost'] * (float) $cp['value']) / 100.0);
+                if ((float) $cp['max_discount_amount'] > 0 && $discount > (float) $cp['max_discount_amount']) {
+                    $discount = (float) $cp['max_discount_amount'];
+                }
+            } else {
+                $discount = (float) $cp['value'];
+            }
+            $applied_coupon = $cp;
+        }
+
+        $total_cost = max(0.0, (float) $cost_info['total_cost'] - $discount);
+
+        if (strtolower($gateway) === 'balance') {
             if (($config['enable_balance'] ?? 'no') !== 'yes') {
                 api_out(false, class_exists('Lang') ? Lang::T('Balance not enabled') : 'Fitur Saldo tidak diaktifkan.', null, 400);
             }
-            if (strtoupper(trim($plan['type'])) === 'BALANCE') {
+            if (strtoupper(trim((string) $plan['type'])) === 'BALANCE') {
                 api_out(false, 'Topup Saldo tidak dapat dibayar menggunakan Saldo.', null, 400);
             }
-
             $router_name = ($plan['is_radius'] == '1') ? 'radius' : $plan['routers'];
-            if ((float)$user['balance'] < $total_cost) {
+            if ((float) $user['balance'] < $total_cost) {
                 api_out(false, class_exists('Lang') ? Lang::T('Insufficient balance') : 'Saldo Anda tidak mencukupi.', null, 400);
             }
-
             if (class_exists('Package') && Package::rechargeUser($user['id'], $router_name, $plan['id'], 'Customer', 'Balance')) {
                 if (class_exists('Balance') && method_exists('Balance', 'min')) {
                     Balance::min($user['id'], $total_cost);
                 } else {
-                    $user->balance = (float)$user['balance'] - $total_cost;
+                    $user->balance = max(0.0, (float) $user['balance'] - $total_cost);
                     $user->save();
+                }
+                if ($applied_coupon) {
+                    $applied_coupon->usage_count = (int) $applied_coupon['usage_count'] + 1;
+                    $applied_coupon->save();
                 }
                 api_out(true, class_exists('Lang') ? Lang::T('Success to buy package') : 'Paket berhasil diaktifkan menggunakan Saldo!');
             } else {
-                sendTelegram("Buy Package with Balance Failed\n\n#u{$user['username']} #buy \n{$plan['name_plan']}\nRouter: {$router_name}\nPrice: {$total_cost}");
+                notify_telegram_admin("Buy Package with Balance Failed\n\n#u{$user['username']} #buy \n{$plan['name_plan']}\nRouter: {$router_name}\nPrice: {$total_cost}", true);
                 api_out(false, class_exists('Lang') ? Lang::T('Failed to buy package') : 'Gagal mengaktifkan paket.', null, 500);
             }
         }
 
         $active_pgs = array_column(get_active_gateways($config), 'id');
         if (empty($active_pgs)) {
-            sendTelegram("Payment Gateway not set, please set it in Settings");
+            notify_telegram_admin('Payment Gateway not set, please set it in Settings', true);
             api_out(false, class_exists('Lang') ? Lang::T('Failed to create Transaction..') : 'Payment Gateway belum diatur oleh Admin.', null, 400);
         }
-
-        if (empty($gateway) || !in_array($gateway, $active_pgs)) {
+        if ($gateway === '' || !in_array($gateway, $active_pgs, true)) {
             api_out(false, class_exists('Lang') ? Lang::T('Please select Payment Gateway') : 'Silakan pilih Payment Gateway yang tersedia.', null, 400);
         }
 
@@ -358,7 +433,10 @@ switch ($action) {
         }
 
         if (function_exists('run_hook')) {
-            @run_hook('customer_buy_plan');
+            try {
+                @run_hook('customer_buy_plan');
+            } catch (Throwable $e) {
+            }
         }
 
         include_once $gw_file;
@@ -373,24 +451,24 @@ switch ($action) {
             if (empty($valid_ch_ids)) {
                 api_out(false, 'Admin belum mengaktifkan channel pembayaran pada plugin ' . strtoupper($gateway) . '.', null, 400);
             }
-            if (empty($channel_choice) || !in_array($channel_choice, $valid_ch_ids)) {
+            if ($channel_choice === '' || !in_array($channel_choice, $valid_ch_ids, true)) {
                 api_out(false, 'Silakan pilih Channel Pembayaran ' . strtoupper($gateway) . ' terlebih dahulu.', null, 400);
             }
         }
 
         $min_req = get_gateway_min_amount(strtolower($gateway), $channel_choice);
         if ($total_cost < $min_req) {
-            api_out(false, 'Minimal pembayaran untuk channel ' . ($channel_choice ?: strtoupper($gateway)) . ' adalah Rp ' . number_format($min_req, 0, ',', '.') . '. Silakan pilih channel QRIS / E-Wallet atau lakukan Topup Saldo terlebih dahulu.', null, 400);
+            api_out(false, 'Minimal pembayaran untuk channel ' . ($channel_choice !== '' ? $channel_choice : strtoupper($gateway)) . ' adalah Rp ' . number_format($min_req, 0, ',', '.') . '. Silakan pilih channel QRIS / E-Wallet atau lakukan Topup Saldo terlebih dahulu.', null, 400);
         }
 
         $router = ['id' => 0, 'name' => 'balance'];
         if ($plan['is_radius'] == '1') {
             $router['id']   = 0;
             $router['name'] = 'radius';
-        } elseif (strtoupper(trim($plan['type'])) !== 'BALANCE' && !empty($plan['routers']) && $plan['routers'] !== 'balance') {
+        } elseif (strtoupper(trim((string) $plan['type'])) !== 'BALANCE' && !empty($plan['routers']) && $plan['routers'] !== 'balance') {
             $r_row = ORM::for_table('tbl_routers')->where('enabled', '1')->where('name', $plan['routers'])->find_one();
             if ($r_row) {
-                $router['id']   = (int)$r_row['id'];
+                $router['id']   = (int) $r_row['id'];
                 $router['name'] = $r_row['name'];
             } else {
                 $router['id']   = 0;
@@ -399,7 +477,7 @@ switch ($action) {
         }
 
         $id = 0;
-        $d = ORM::for_table('tbl_payment_gateway')
+        $d  = ORM::for_table('tbl_payment_gateway')
             ->where('username', $user['username'])
             ->where('status', 1)
             ->find_one();
@@ -409,7 +487,7 @@ switch ($action) {
                 api_out(false, class_exists('Lang') ? Lang::T('You already have unpaid transaction, cancel it or pay it.') : 'Anda masih memiliki transaksi yang belum dibayar.', parse_qris_trx($d, $config), 400);
             } else {
                 if ($gateway === $d['gateway']) {
-                    $id = (int)$d['id'];
+                    $id = (int) $d['id'];
                 } else {
                     $d->status = 4;
                     $d->save();
@@ -430,7 +508,8 @@ switch ($action) {
         $d->price        = $total_cost;
         $d->created_date = date('Y-m-d H:i:s');
         $d->status       = 1;
-        if (!empty($channel_choice)) {
+
+        if ($channel_choice !== '') {
             $d->payment_method = $channel_choice;
             foreach ($gw_channels as $ch_item) {
                 if ($ch_item['id'] === $channel_choice) {
@@ -440,14 +519,19 @@ switch ($action) {
             }
         }
         $d->save();
-        $id = (int)$d->id();
+        $id = (int) $d->id();
 
         if (!$id) {
             api_out(false, class_exists('Lang') ? Lang::T('Failed to create Transaction..') : 'Gagal membuat transaksi.', null, 500);
         }
 
-        $routes[2] = (string)$router['id'];
-        $routes[3] = (string)$plan['id'];
+        if ($applied_coupon) {
+            $applied_coupon->usage_count = (int) $applied_coupon['usage_count'] + 1;
+            $applied_coupon->save();
+        }
+
+        $routes[2] = (string) $router['id'];
+        $routes[3] = (string) $plan['id'];
         $routes[4] = $channel_choice;
 
         $GLOBALS['API_INTERCEPT_MODE']   = 'buy';
@@ -459,14 +543,19 @@ switch ($action) {
         api_out(true, class_exists('Lang') ? Lang::T('Create Transaction Success') : 'Tagihan berhasil dibuat.', parse_qris_trx($updated, $config));
         break;
 
+    // =========================================================================
+    // 6. DETAIL, CEK STATUS & BATALKAN TAGIHAN PEMBAYARAN
+    // =========================================================================
     case 'payment_detail':
-        $user = require_customer_session($api_secret);
-        $trx_id = (int)_req('id');
-        $trx = ORM::for_table('tbl_payment_gateway')
+        $user   = require_customer_session($api_secret);
+        $trx_id = (int) _req('id');
+        $trx    = ORM::for_table('tbl_payment_gateway')
             ->where('username', $user['username'])
             ->find_one($trx_id);
 
-        if (!$trx) api_out(false, 'Tagihan tidak ditemukan.', null, 404);
+        if (!$trx) {
+            api_out(false, 'Tagihan tidak ditemukan.', null, 404);
+        }
         check_and_expire_trx($trx);
         $is_paid = verify_already_recharged($trx);
         api_out(true, $is_paid ? 'Pembayaran diterima!' : 'Menunggu pembayaran.', [
@@ -477,14 +566,12 @@ switch ($action) {
 
     case 'check_payment':
     case 'qris_status':
-        global $PAYMENTGATEWAY_PATH;
         $pg_dir = !empty($PAYMENTGATEWAY_PATH) ? $PAYMENTGATEWAY_PATH : 'system/paymentgateway';
+        $user   = require_customer_session($api_secret);
+        $trx_id = (int) _req('id');
 
-        $user = require_customer_session($api_secret);
-        $trx_id = (int)_req('id');
-
-        $lock_file = sys_get_temp_dir() . '/arneta_paylock_' . $trx_id . '.lock';
-        $lock_fp = @fopen($lock_file, 'c+');
+        $lock_file = sys_get_temp_dir() . '/phpnuxbill_paylock_' . $trx_id . '.lock';
+        $lock_fp   = @fopen($lock_file, 'c+');
         if ($lock_fp) {
             if (!@flock($lock_fp, LOCK_EX | LOCK_NB)) {
                 @flock($lock_fp, LOCK_EX);
@@ -503,23 +590,24 @@ switch ($action) {
         $trx = ORM::for_table('tbl_payment_gateway')
             ->where('username', $user['username'])
             ->find_one($trx_id);
-
         if (!$trx) {
             api_out(false, class_exists('Lang') ? Lang::T('Payment not found') : 'Tagihan tidak ditemukan.', null, 404);
         }
 
         check_and_expire_trx($trx);
-
-        $gw_lower = strtolower(trim((string)($trx['gateway'] ?? '')));
+        $gw_lower          = strtolower(trim((string) ($trx['gateway'] ?? '')));
         $can_query_gateway = ($gw_lower === 'viaqris') || !empty($trx['gateway_trx_id']);
 
-        if (!verify_already_recharged($trx) && (int)$trx['status'] === 1 && !empty($trx['gateway']) && $can_query_gateway) {
+        if (!verify_already_recharged($trx) && (int) $trx['status'] === 1 && !empty($trx['gateway']) && $can_query_gateway) {
             $gw_file = rtrim($pg_dir, '/\\') . DIRECTORY_SEPARATOR . $trx['gateway'] . '.php';
             if (!file_exists($gw_file)) {
                 api_out(false, class_exists('Lang') ? Lang::T('No Payment Gateway Available') : 'Plugin Payment Gateway tidak tersedia.', null, 400);
             }
             if (function_exists('run_hook')) {
-                @run_hook('customer_check_payment_status');
+                try {
+                    @run_hook('customer_check_payment_status');
+                } catch (Throwable $e) {
+                }
             }
             include_once $gw_file;
             $GLOBALS['API_INTERCEPT_MODE']   = 'check_payment';
@@ -531,7 +619,7 @@ switch ($action) {
                 @call_user_func($trx['gateway'] . '_get_status', $trx, $user);
             }
             $GLOBALS['API_INTERCEPT_TRX_ID'] = null;
-            $trx = ORM::for_table('tbl_payment_gateway')->find_one($trx_id);
+            $trx                             = ORM::for_table('tbl_payment_gateway')->find_one($trx_id);
         }
 
         $is_paid = verify_already_recharged($trx);
@@ -544,14 +632,17 @@ switch ($action) {
     case 'cancel_payment':
     case 'qris_cancel':
         $user = require_customer_session($api_secret);
-        $trx = ORM::for_table('tbl_payment_gateway')
+        $trx  = ORM::for_table('tbl_payment_gateway')
             ->where('username', $user['username'])
             ->where('status', 1)
-            ->find_one((int)_req('id'));
+            ->find_one((int) _req('id'));
 
         if ($trx && !verify_already_recharged($trx)) {
             if (function_exists('run_hook')) {
-                @run_hook('customer_cancel_payment');
+                try {
+                    @run_hook('customer_cancel_payment');
+                } catch (Throwable $e) {
+                }
             }
             $trx->pg_paid_response = '{}';
             $trx->status           = 4;
