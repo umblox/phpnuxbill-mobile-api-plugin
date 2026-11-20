@@ -1,42 +1,54 @@
 <?php
+
 /**
  * PHPNuxBill Mobile API Plugin - Main Dispatcher
  * Path: system/plugin/mobile_api_modules/dispatcher.php
  * Dipanggil melalui gerbang resmi system/api.php?r=plugin/mobile_api
- */
+ **/
 
-global $config, $_c, $admin, $user, $ui, $routes, $_app_stage, $root_path, $lan_file, $_L, $DEVICE_PATH, $PAYMENTGATEWAY_PATH, $UPLOAD_PATH, $CACHE_PATH, $PLUGIN_PATH, $isApi, $zero, $isChangePlan, $phpnux_root;
+global $config, $_c, $admin, $user, $ui, $routes, $_app_stage, $root_path, $lan_file, $_L, $DEVICE_PATH, $PAYMENTGATEWAY_PATH, $UPLOAD_PATH, $CACHE_PATH, $PLUGIN_PATH, $isApi, $zero, $isChangePlan, $phpnux_root, $api_secret;
 
 $isApi = true;
+
 if (ob_get_level() === 0) {
     ob_start();
 }
-header('Content-Type: application/json; charset=utf-8');
-header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type, Authorization');
+
+if (!headers_sent()) {
+    header('Content-Type: application/json; charset=utf-8');
+    header('Access-Control-Allow-Origin: *');
+    header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
+    header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With');
+}
 
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
     http_response_code(200);
     exit();
 }
 
+// Muat bootstrap & seluruh fungsi helper bersama
+require_once __DIR__ . '/helpers_common.php';
+
 // Parse JSON body jika request dikirim dengan Content-Type: application/json
 $raw_input = file_get_contents('php://input');
-if (!empty($raw_input)) {
-    $json_input = json_decode($raw_input, true);
-    if (is_array($json_input)) {
-        foreach ($json_input as $k => $v) {
-            $_POST[$k]    = $v;
-            $_REQUEST[$k] = $v;
+if ($raw_input !== false && trim($raw_input) !== '') {
+    $content_type = strtolower((string) ($_SERVER['CONTENT_TYPE'] ?? $_SERVER['HTTP_CONTENT_TYPE'] ?? ''));
+    $trimmed_raw  = ltrim($raw_input);
+    if (strpos($content_type, 'application/json') !== false || ($trimmed_raw !== '' && ($trimmed_raw[0] === '{' || $trimmed_raw[0] === '['))) {
+        $json_input = json_decode($raw_input, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            api_out(false, 'Format JSON pada body request tidak valid: ' . json_last_error_msg(), null, 400);
+        }
+        if (is_array($json_input)) {
+            foreach ($json_input as $k => $v) {
+                $_POST[$k]    = $v;
+                $_REQUEST[$k] = $v;
+            }
         }
     }
 }
 
-// Muat bootstrap & seluruh fungsi helper bersama
-require_once __DIR__ . '/helpers_common.php';
-
-// Gunakan secret key khusus Mobile API (tanpa ketergantungan pada tawk.to)
+// Gunakan $api_secret global PHPNuxBill jika tersedia, atau fallback ke mobile_api_secret di tbl_appconfig
 if (empty($api_secret)) {
     if (!empty($config['mobile_api_secret'])) {
         $api_secret = $config['mobile_api_secret'];
@@ -48,32 +60,34 @@ if (empty($api_secret)) {
                 $api_secret = $sec_row['value'];
             } else {
                 if (!$sec_row) {
-                    $sec_row = ORM::for_table('tbl_appconfig')->create();
+                    $sec_row          = ORM::for_table('tbl_appconfig')->create();
                     $sec_row->setting = 'mobile_api_secret';
                 }
                 $sec_row->value = $api_secret;
                 $sec_row->save();
             }
-            $config['mobile_api_secret']           = $api_secret;
+            $config['mobile_api_secret']            = $api_secret;
             $GLOBALS['config']['mobile_api_secret'] = $api_secret;
-        } catch (Throwable $e) {}
+        } catch (Throwable $e) {
+        }
     }
 }
+$GLOBALS['api_secret'] = $api_secret;
 
 // Resolusi parameter $action dari system/api.php (?r=plugin/mobile_api/<action> atau &action=<action>)
-$_raw_r   = trim((string)($_GET['r'] ?? $_POST['r'] ?? $_GET['_route'] ?? ''));
+$_raw_r   = trim((string) ($_GET['r'] ?? $_POST['r'] ?? $_GET['_route'] ?? ''));
 $_r_parts = array_values(array_filter(explode('/', $_raw_r)));
 
 if (!empty($_REQUEST['action'])) {
-    $action = trim((string)$_REQUEST['action']);
+    $action = trim((string) $_REQUEST['action']);
 } elseif (isset($_r_parts[0]) && $_r_parts[0] === 'plugin' && !empty($_r_parts[2])) {
-    $action = trim((string)$_r_parts[2]);
+    $action = trim((string) $_r_parts[2]);
 } elseif (isset($_r_parts[0]) && $_r_parts[0] !== 'plugin' && !empty($_r_parts[1])) {
-    $action = trim((string)$_r_parts[1]);
+    $action = trim((string) $_r_parts[1]);
 } elseif (isset($routes[1]) && !empty($routes[1]) && $routes[1] !== 'mobile_api') {
-    $action = trim((string)$routes[1]);
+    $action = trim((string) $routes[1]);
 } elseif (isset($routes[2]) && !empty($routes[2])) {
-    $action = trim((string)$routes[2]);
+    $action = trim((string) $routes[2]);
 } else {
     $action = 'index';
 }
@@ -239,16 +253,28 @@ try {
             break;
 
         default:
-            $comp_name = $config['CompanyName'] ?? 'PHPNuxBill';
-            $curr_code = $config['currency_code'] ?? 'Rp.';
-            api_out(true, 'Terhubung ke ' . $comp_name . ' (PHPNuxBill Mobile API v3.0.0)', [
+            $comp_name = !empty($config['CompanyName']) ? $config['CompanyName'] : 'PHPNuxBill';
+            $curr_code = !empty($config['currency_code']) ? $config['currency_code'] : 'Rp.';
+            $srv_lang  = strtolower(trim((string) ($config['language'] ?? 'indonesia')));
+            $logo_url  = function_exists('get_server_logo_url') ? get_server_logo_url() : '';
+            $is_en     = (strtolower(trim((string) ($_SERVER['HTTP_X_APP_LANG'] ?? _req('lang', '')))) === 'en');
+
+            $welcome_msg = $is_en
+                ? ('Connected to ' . $comp_name . ' (PHPNuxBill Mobile API v3.0.0)')
+                : ('Terhubung ke ' . $comp_name . ' (PHPNuxBill Mobile API v3.0.0)');
+
+            api_out(true, $welcome_msg, [
                 'version'       => '3.0.0',
                 'action'        => $action,
                 'company_name'  => $comp_name,
                 'currency_code' => $curr_code,
+                'language'      => $srv_lang,
+                'logo_url'      => $logo_url,
                 'company'       => [
                     'name'     => $comp_name,
-                    'currency' => $curr_code
+                    'currency' => $curr_code,
+                    'language' => $srv_lang,
+                    'logo_url' => $logo_url
                 ]
             ]);
             break;
