@@ -235,7 +235,7 @@ try {
             require __DIR__ . '/plugin_genieacs.php';
             break;
 
-        // 10. Modul Portal APK Pelanggan
+            // 10. Modul Portal APK Pelanggan
         case 'login':
         case 'dashboard':
         case 'plans':
@@ -249,8 +249,18 @@ try {
         case 'qris_status':
         case 'cancel_payment':
         case 'qris_cancel':
+        case 'customer_inbox':
+        case 'customer_inbox_read':
+        case 'customer_inbox_delete':
+        case 'customer_transfer_balance':
+        case 'customer_send_plan':
+        case 'customer_sync_plan':
+        case 'customer_extend_plan':
+        case 'customer_profile_save':
+        case 'customer_change_password':
             require __DIR__ . '/customer_portal_api.php';
             break;
+
 
         default:
             $comp_name = !empty($config['CompanyName']) ? $config['CompanyName'] : 'PHPNuxBill';
