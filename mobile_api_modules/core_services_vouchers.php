@@ -1,30 +1,32 @@
 <?php
+
 /**
  * PHPNuxBill Mobile API Plugin - Active Services, Recharge, Deposit & Vouchers Module
  * Path: system/plugin/mobile_api_modules/core_services_vouchers.php
- */
+ **/
 
-global $config, $_c, $admin, $ui, $UPLOAD_PATH, $DEVICE_PATH, $zero, $_app_stage, $isChangePlan;
+global $config, $_c, $admin, $ui, $UPLOAD_PATH, $DEVICE_PATH, $zero, $_app_stage, $isChangePlan, $api_secret;
 
 // Helper lokal untuk memastikan channel notifikasi pembayaran pelanggan aktif sesuai setting gateway web
 if (!function_exists('ensure_official_payment_notif_channel')) {
-    function ensure_official_payment_notif_channel() {
+    function ensure_official_payment_notif_channel()
+    {
         global $config, $_c;
-        $cur = strtolower(trim((string)($config['user_notification_payment'] ?? '')));
+        $cur = strtolower(trim((string) ($config['user_notification_payment'] ?? '')));
         if ($cur === '' || $cur === 'none') {
             if (!empty($config['wa_url'])) {
-                $config['user_notification_payment']           = 'wa';
-                $_c['user_notification_payment']               = 'wa';
+                $config['user_notification_payment']            = 'wa';
+                $_c['user_notification_payment']                = 'wa';
                 $GLOBALS['config']['user_notification_payment'] = 'wa';
                 $GLOBALS['_c']['user_notification_payment']     = 'wa';
             } elseif (!empty($config['sms_url'])) {
-                $config['user_notification_payment']           = 'sms';
-                $_c['user_notification_payment']               = 'sms';
+                $config['user_notification_payment']            = 'sms';
+                $_c['user_notification_payment']                = 'sms';
                 $GLOBALS['config']['user_notification_payment'] = 'sms';
                 $GLOBALS['_c']['user_notification_payment']     = 'sms';
             } elseif (!empty($config['smtp_host'])) {
-                $config['user_notification_payment']           = 'email';
-                $_c['user_notification_payment']               = 'email';
+                $config['user_notification_payment']            = 'email';
+                $_c['user_notification_payment']                = 'email';
                 $GLOBALS['config']['user_notification_payment'] = 'email';
                 $GLOBALS['_c']['user_notification_payment']     = 'email';
             }
@@ -34,32 +36,55 @@ if (!function_exists('ensure_official_payment_notif_channel')) {
 
 switch ($action) {
     // =========================================================================
-    // LAYANAN: PELANGGAN AKTIF, ISI ULANG PAKET, ISI ULANG SALDO, VOUCHER
+    // 1. DAFTAR LAYANAN AKTIF / KEDALUWARSA (BEBAS N+1 QUERY)
     // =========================================================================
     case 'admin_prepaid_list':
-        $admin = require_admin_session($api_secret);
-        $search = trim(_req('search'));
-        $status = trim(_req('status'));
-        $limit  = max(10, min(300, (int)(_req('limit') ?: 120)));
+        $admin  = require_admin_session($api_secret);
+        $search = trim((string) _req('search'));
+        $status = trim((string) _req('status'));
+        $router = trim((string) _req('router'));
+        $limit  = max(10, min(300, (int) (_req('limit') ?: 120)));
 
         $cust_map = [];
         foreach (ORM::for_table('tbl_customers')->find_array() as $c) {
-            $cust_map[(int)$c['id']] = $c;
+            $cust_map[(int) $c['id']] = $c;
         }
-
         $plan_map = [];
         foreach (ORM::for_table('tbl_plans')->find_array() as $p) {
-            $plan_map[(int)$p['id']] = (float)$p['price'];
+            $plan_map[(int) $p['id']] = (float) $p['price'];
         }
 
         $q = ORM::for_table('tbl_user_recharges');
         if ($status !== '' && strtolower($status) !== 'all') {
             $q->where('status', $status);
         }
+        if ($router !== '' && strtolower($router) !== 'all') {
+            $q->where('routers', $router);
+        }
+        if ($search !== '') {
+            $like          = '%' . $search . '%';
+            $matched_cids  = [];
+            foreach ($cust_map as $cid => $c_row) {
+                if (
+                    stripos((string) ($c_row['fullname'] ?? ''), $search) !== false ||
+                    stripos((string) ($c_row['phonenumber'] ?? ''), $search) !== false
+                ) {
+                    $matched_cids[] = $cid;
+                }
+            }
+            if (!empty($matched_cids)) {
+                $placeholders = implode(',', array_fill(0, count($matched_cids), '?'));
+                $params       = array_merge([$like, $like, $like], $matched_cids);
+                $q->where_raw("(username LIKE ? OR namebp LIKE ? OR routers LIKE ? OR customer_id IN ($placeholders))", $params);
+            } else {
+                $q->where_raw('(username LIKE ? OR namebp LIKE ? OR routers LIKE ?)', [$like, $like, $like]);
+            }
+        }
+
         $rows = $q->order_by_desc('id')->limit($limit)->find_array();
 
         // Ambil seluruh transaksi terkait hanya dalam 1 Query (Bebas N+1 Query)
-        $usernames = array_values(array_unique(array_filter(array_column($rows, 'username'))));
+        $usernames      = array_values(array_unique(array_filter(array_column($rows, 'username'))));
         $trx_exact_map  = [];
         $trx_latest_map = [];
         if (!empty($usernames)) {
@@ -80,42 +105,20 @@ switch ($action) {
         }
 
         $items = [];
-        $s_lower = strtolower($search);
         foreach ($rows as $r) {
-            $c = $cust_map[(int)$r['customer_id']] ?? null;
-            $r['fullname']       = $c['fullname'] ?? $r['username'];
-            $r['phonenumber']    = $c['phonenumber'] ?? '';
-            $r['email']          = $c['email'] ?? '';
-            $r['address']        = $c['address'] ?? '';
-            $r['city']           = $c['city'] ?? '';
-            $r['balance']        = isset($c['balance']) ? (float)$c['balance'] : 0.0;
-            $r['service_type']   = $c['service_type'] ?? ($r['type'] ?? 'Hotspot');
-            $r['account_type']   = $c['account_type'] ?? 'Personal';
-            $r['account_status'] = $c['status'] ?? 'Active';
-            $r['auto_renewal']   = isset($c['auto_renewal']) ? (int)$c['auto_renewal'] : 1;
-            $r['pppoe_username'] = $c['pppoe_username'] ?? '';
-            $r['pppoe_password'] = $c['pppoe_password'] ?? '';
-            $r['pppoe_ip']       = $c['pppoe_ip'] ?? '';
-            $r['coordinates']    = $c['coordinates'] ?? '';
-            $r['created_at']     = $c['created_at'] ?? '';
-            $r['last_login']     = $c['last_login'] ?? '';
+            $c                = $cust_map[(int) $r['customer_id']] ?? null;
+            $r['fullname']    = $c ? ($c['fullname'] ?: $r['username']) : $r['username'];
+            $r['phonenumber'] = $c ? ($c['phonenumber'] ?? '') : '';
 
-            if ($s_lower !== '') {
-                $haystack = strtolower($r['username'] . ' ' . $r['fullname'] . ' ' . $r['namebp'] . ' ' . $r['routers'] . ' ' . $r['phonenumber']);
-                if (strpos($haystack, $s_lower) === false) continue;
-            }
+            $k_exact        = $r['username'] . '|' . $r['namebp'] . '|' . $r['recharged_on'];
+            $k_latest       = $r['username'] . '|' . $r['namebp'];
+            $trx            = $trx_exact_map[$k_exact] ?? ($trx_latest_map[$k_latest] ?? null);
+            $is_zero        = (stripos($r['method'] ?? '', 'Recharge Zero') !== false || stripos($r['method'] ?? '', 'zero') !== false);
+            $fallback_price = $is_zero ? 0.0 : ($plan_map[(int) $r['plan_id']] ?? 0.0);
 
-            $k_exact  = $r['username'] . '|' . $r['namebp'] . '|' . $r['recharged_on'];
-            $k_latest = $r['username'] . '|' . $r['namebp'];
-            $trx = $trx_exact_map[$k_exact] ?? ($trx_latest_map[$k_latest] ?? null);
-
-            $is_zero = (stripos($r['method'] ?? '', 'Recharge Zero') !== false || stripos($r['method'] ?? '', 'zero') !== false);
-            $fallback_price = $is_zero ? 0.0 : ($plan_map[(int)$r['plan_id']] ?? 0.0);
-
-            $r['price']   = $trx ? (float)$trx['price'] : $fallback_price;
+            $r['price']   = $trx ? (float) $trx['price'] : $fallback_price;
             $r['invoice'] = ($trx && !empty($trx['invoice'])) ? $trx['invoice'] : ('INV-' . $r['id']);
-
-            $items[] = $r;
+            $items[]      = $r;
         }
 
         api_out(true, 'Daftar pelanggan aktif dimuat', [
@@ -124,17 +127,19 @@ switch ($action) {
         ]);
         break;
 
+    // =========================================================================
+    // 2. ISI ULANG PAKET PELANGGAN (SELARAS DENGAN plan.php & Package.php)
+    // =========================================================================
     case 'admin_prepaid_recharge':
-        // 100% Mengikuti alur resmi system/controllers/plan.php (case 'recharge-post') & Package.php
         $admin = require_admin_session($api_secret);
         @set_time_limit(60);
         ensure_official_payment_notif_channel();
 
-        $id_customer = (int)(_post('customer_id') ?: _post('id_customer'));
-        $planId      = (int)(_post('plan_id') ?: _post('plan'));
-        $using       = trim(_post('using') ?: 'Cash');
-        $req_server  = trim(_post('server') ?: _post('routers'));
-        $note        = trim(_post('note') ?: '');
+        $id_customer = (int) (_post('customer_id') ?: _post('id_customer'));
+        $planId      = (int) (_post('plan_id') ?: _post('plan'));
+        $using       = trim((string) (_post('using') ?: 'Cash'));
+        $req_server  = trim((string) (_post('server') ?: _post('routers')));
+        $note        = trim((string) (_post('note') ?: ''));
 
         if ($id_customer <= 0 || $planId <= 0) {
             api_out(false, class_exists('Lang') ? Lang::T('All field is required') : 'Pilih pelanggan dan paket terlebih dahulu.', null, 400);
@@ -151,8 +156,7 @@ switch ($action) {
         if (!$plan) {
             api_out(false, class_exists('Lang') ? Lang::T('Plan not found') : 'Paket internet tidak ditemukan.', null, 404);
         }
-
-        if (!in_array($admin['user_type'], ['SuperAdmin', 'Admin']) && (int)$plan['enabled'] !== 1) {
+        if (!in_array($admin['user_type'], ['SuperAdmin', 'Admin'], true) && (int) $plan['enabled'] !== 1) {
             api_out(false, 'Paket ini berstatus Hidden dan hanya dapat diakses oleh SuperAdmin/Admin.', null, 403);
         }
 
@@ -160,48 +164,34 @@ switch ($action) {
             ? 'Radius'
             : (!empty($plan['routers']) ? $plan['routers'] : (!empty($req_server) ? $req_server : 'radius'));
 
-        $bills = [];
-        $add_cost = 0;
-        if (class_exists('User') && method_exists('User', 'getBills')) {
-            list($bills, $add_cost) = User::getBills($id_customer);
-        }
+        $cost_info  = calculate_order_cost($id_customer, $plan->as_array(), $config);
+        $total_cost = (float) $cost_info['total_cost'];
 
-        $tax_enable = isset($config['enable_tax']) ? $config['enable_tax'] : 'no';
-        $tax_rate_setting = isset($config['tax_rate']) ? $config['tax_rate'] : null;
-        $custom_tax_rate = isset($config['custom_tax_rate']) ? (float)$config['custom_tax_rate'] : null;
-        $tax_rate = ($tax_rate_setting === 'custom') ? $custom_tax_rate : $tax_rate_setting;
-        $tax = ($tax_enable === 'yes' && class_exists('Package') && method_exists('Package', 'tax'))
-            ? Package::tax($plan['price'], $tax_rate)
-            : 0;
-
-        $total_cost = (float)$plan['price'] + (float)$add_cost + (float)$tax;
-
-        $gateway = ucwords($using);
-        $channel = $admin['fullname'] ?: $admin['username'];
-        $zero = 0;
+        $gateway         = ucwords($using);
+        $channel         = $admin['fullname'] ?: $admin['username'];
+        $zero            = 0;
         $GLOBALS['zero'] = 0;
+        $using_lower     = strtolower($using);
 
-        $using_lower = strtolower($using);
         if (($using_lower === 'balance' || $using_lower === 'recharge balance') && ($config['enable_balance'] ?? 'yes') === 'yes') {
-            if ((float)$cust['balance'] < $total_cost) {
+            if ((float) $cust['balance'] < $total_cost) {
                 api_out(false, class_exists('Lang') ? Lang::T('insufficient balance') : 'Saldo pelanggan tidak mencukupi (Butuh ' . number_format($total_cost, 0, ',', '.') . ').', null, 400);
             }
-            $gateway = 'Recharge Balance';
+            $gateway     = 'Recharge Balance';
             $using_lower = 'balance';
         } elseif ($using_lower === 'zero' || $using_lower === 'recharge zero') {
-            $add_cost = 0;
-            $zero = 1;
+            $zero            = 1;
             $GLOBALS['zero'] = 1;
-            $gateway = 'Recharge Zero';
+            $gateway         = 'Recharge Zero';
         }
 
         $ok = false;
         @ob_start();
         if (class_exists('Package') && method_exists('Package', 'rechargeUser')) {
-            // Package::rechargeUser otomatis memanggil Package::createInvoice($in) (Telegram Admin + WA/SMS/Email Pelanggan)
             try {
-                $ok = Package::rechargeUser($id_customer, $server, $planId, $gateway, $channel);
-            } catch (Throwable $e) {}
+                $ok = Package::rechargeUser($id_customer, $server, $planId, $gateway, $channel, $note);
+            } catch (Throwable $e) {
+            }
         }
         @ob_end_clean();
         unset($zero, $GLOBALS['zero']);
@@ -213,47 +203,67 @@ switch ($action) {
                 } else {
                     $c_upd = ORM::for_table('tbl_customers')->find_one($cust['id']);
                     if ($c_upd) {
-                        $c_upd->balance = max(0, (float)$c_upd['balance'] - $total_cost);
+                        $c_upd->balance = max(0, (float) $c_upd['balance'] - $total_cost);
                         $c_upd->save();
                     }
                 }
             }
 
-            $in = ORM::for_table('tbl_transactions')->where('username', $cust['username'])->order_by_desc('id')->find_one();
+            $in        = ORM::for_table('tbl_transactions')->where('username', $cust['username'])->order_by_desc('id')->find_one();
             $price_fmt = (class_exists('Lang') && method_exists('Lang', 'moneyFormat'))
                 ? Lang::moneyFormat($in ? $in['price'] : $plan['price'])
-                : (($config['currency_code'] ?? 'Rp.') . ' ' . number_format((float)($in ? $in['price'] : $plan['price']), 0, ',', '.'));
+                : (($config['currency_code'] ?? 'Rp.') . ' ' . number_format((float) ($in ? $in['price'] : $plan['price']), 0, ',', '.'));
 
             write_admin_log($admin, '[' . $admin['username'] . ']: Recharge ' . $cust['username'] . ' [' . ($in ? $in['plan_name'] : $plan['name_plan']) . '][' . $price_fmt . ']');
             unset($_SESSION['notify'], $_SESSION['ntype']);
 
             $cust_fresh = ORM::for_table('tbl_customers')->find_one($cust['id']) ?: $cust;
-            $in_arr = $in ? $in->as_array() : [
-                'id' => 0, 'invoice' => 'INV-' . time(), 'username' => $cust['username'],
-                'plan_name' => $plan['name_plan'], 'price' => ($gateway === 'Recharge Zero' ? 0 : $plan['price']),
-                'recharged_on' => date('Y-m-d'), 'recharged_time' => date('H:i:s'),
-                'expiration' => date('Y-m-d'), 'time' => date('H:i:s'),
-                'method' => $gateway . ' - ' . $channel, 'routers' => $server, 'type' => $plan['type']
+            $in_arr     = $in ? $in->as_array() : [
+                'id'             => 0,
+                'invoice'        => 'INV-' . time(),
+                'username'       => $cust['username'],
+                'plan_name'      => $plan['name_plan'],
+                'price'          => ($gateway === 'Recharge Zero' ? 0 : $plan['price']),
+                'recharged_on'   => date('Y-m-d'),
+                'recharged_time' => date('H:i:s'),
+                'expiration'     => date('Y-m-d'),
+                'time'           => date('H:i:s'),
+                'method'         => $gateway . ' - ' . $channel,
+                'routers'        => $server,
+                'type'           => $plan['type']
             ];
+
             api_out(true, 'Paket ' . $plan['name_plan'] . ' berhasil diaktifkan untuk ' . $cust['fullname'] . '!', [
                 'invoice' => $in_arr,
                 'receipt' => build_web_invoice_receipt($in_arr, $cust_fresh, $config, $note)
             ]);
         } else {
-            $err = isset($_SESSION['notify']) ? trim(strip_tags($_SESSION['notify'])) : 'Gagal mengaktifkan paket ke Router ' . $server . '.';
+            $err = isset($_SESSION['notify']) ? trim(strip_tags((string) $_SESSION['notify'])) : 'Gagal mengaktifkan paket ke Router ' . $server . '.';
             unset($_SESSION['notify'], $_SESSION['ntype']);
             api_out(false, $err, null, 500);
         }
         break;
 
+    // =========================================================================
+    // 3. HAPUS / EDIT / EXTEND LAYANAN PELANGGAN AKTIF
+    // =========================================================================
     case 'admin_prepaid_delete':
         $admin = require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
-        $id = (int)_req('id');
-        $d = ORM::for_table('tbl_user_recharges')->find_one($id);
-        if (!$d) api_out(false, 'Data langganan tidak ditemukan.', null, 404);
+        if (strtolower((string) ($_app_stage ?? '')) === 'demo') {
+            api_out(false, 'You cannot perform this action in Demo mode', null, 403);
+        }
+
+        $id = (int) _req('id');
+        $d  = ORM::for_table('tbl_user_recharges')->find_one($id);
+        if (!$d) {
+            api_out(false, 'Data langganan tidak ditemukan.', null, 404);
+        }
 
         if (function_exists('run_hook')) {
-            try { @run_hook('delete_customer_active_plan'); } catch (Throwable $e) {}
+            try {
+                @run_hook('delete_customer_active_plan');
+            } catch (Throwable $e) {
+            }
         }
 
         $p = ORM::for_table('tbl_plans')->find_one($d['plan_id']);
@@ -268,71 +278,96 @@ switch ($action) {
                 $d_cls = $p['device'];
                 if (class_exists($d_cls)) {
                     try {
-                        $dev = new $d_cls();
-                        if (method_exists($dev, 'remove_customer')) @$dev->remove_customer($c, $p);
-                    } catch (Throwable $e) {}
+                        $p['plan_expired'] = 0;
+                        $dev               = new $d_cls();
+                        if (method_exists($dev, 'remove_customer')) {
+                            @$dev->remove_customer($c, $p);
+                        }
+                    } catch (Throwable $e) {
+                    }
                 }
             }
         }
+
         $uname = $d['username'];
         $pname = $d['namebp'];
         $d->delete();
+
         write_admin_log($admin, '[' . $admin['username'] . ']: Delete Plan for Customer ' . $uname . ' [' . $pname . ']');
         api_out(true, 'Paket pelanggan ' . $uname . ' berhasil dihapus.');
         break;
 
     case 'admin_prepaid_edit':
         $admin = require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
-        $id         = (int)_post('id');
-        $id_plan    = (int)_post('id_plan');
-        $expiration = trim(_post('expiration'));
-        $time       = trim(_post('time') ?: '23:59:59');
+        if (strtolower((string) ($_app_stage ?? '')) === 'demo') {
+            api_out(false, 'You cannot perform this action in Demo mode', null, 403);
+        }
+
+        $id         = (int) _post('id');
+        $id_plan    = (int) _post('id_plan');
+        $expiration = trim((string) _post('expiration'));
+        $time       = trim((string) (_post('time') ?: '23:59:59'));
 
         $d = ORM::for_table('tbl_user_recharges')->find_one($id);
         if (!$d) {
             api_out(false, class_exists('Lang') ? Lang::T('Data Not Found') : 'Data pelanggan aktif tidak ditemukan.', null, 404);
         }
-        $oldPlanID = (int)$d['plan_id'];
+
+        $oldPlanID = (int) $d['plan_id'];
         $newPlan   = ORM::for_table('tbl_plans')->where('id', $id_plan)->find_one();
         if (!$newPlan) {
             api_out(false, 'Plan Not Found', null, 404);
         }
 
         if (function_exists('run_hook')) {
-            try { @run_hook('edit_customer_plan'); } catch (Throwable $e) {}
+            try {
+                @run_hook('edit_customer_plan');
+            } catch (Throwable $e) {
+            }
         }
 
-        if ($expiration !== '') $d->expiration = $expiration;
-        if ($time !== '') $d->time = $time;
+        if ($expiration !== '') {
+            $d->expiration = $expiration;
+        }
+        $d->time    = $time;
+        $d->plan_id = $id_plan;
+        $d->namebp  = $newPlan['name_plan'];
+        $d->routers = ($newPlan['is_radius'] == '1') ? 'Radius' : $newPlan['routers'];
+        $d->type    = $newPlan['type'];
 
-        if ($d['status'] === 'off' && strtotime($d->expiration . ' ' . $d->time) > time()) {
-            $d->status = 'on';
+        if ($d['status'] === 'on') {
+            $d->status = (strtotime($d['expiration'] . ' ' . $d['time']) > time()) ? 'on' : 'off';
         }
 
-        if ($oldPlanID !== $id_plan) {
-            $d->plan_id = $newPlan['id'];
-            $d->namebp  = $newPlan['name_plan'];
-            $customer   = ORM::for_table('tbl_customers')->find_one($d['customer_id']);
+        $customer = (class_exists('User') && method_exists('User', '_info'))
+            ? User::_info($d['customer_id'])
+            : ORM::for_table('tbl_customers')->find_one($d['customer_id']);
 
-            if ($d['status'] === 'on' && $customer && class_exists('Package') && method_exists('Package', 'getDevice')) {
-                $p_old = ORM::for_table('tbl_plans')->find_one($oldPlanID);
-                if ($p_old) {
-                    $dvc_old = Package::getDevice($p_old);
-                    if (($_app_stage ?? '') !== 'demo' && file_exists($dvc_old)) {
-                        require_once $dvc_old;
-                        $p_old['plan_expired'] = 0;
-                        $cls_old = $p_old['device'];
-                        if (class_exists($cls_old)) {
-                            try { (new $cls_old())->remove_customer($customer, $p_old); } catch (Throwable $e) {}
+        if ($customer && $oldPlanID !== $id_plan && class_exists('Package') && method_exists('Package', 'getDevice')) {
+            $p_old = ORM::for_table('tbl_plans')->where('id', $oldPlanID)->find_one();
+            if ($p_old) {
+                $dvc_old = Package::getDevice($p_old);
+                if (file_exists($dvc_old)) {
+                    require_once $dvc_old;
+                    $p_old['plan_expired'] = 0;
+                    $cls_old               = $p_old['device'];
+                    if (class_exists($cls_old)) {
+                        try {
+                            (new $cls_old())->remove_customer($customer, $p_old);
+                        } catch (Throwable $e) {
                         }
                     }
                 }
-                $dvc_new = Package::getDevice($newPlan);
-                if (($_app_stage ?? '') !== 'demo' && file_exists($dvc_new)) {
-                    require_once $dvc_new;
-                    $cls_new = $newPlan['device'];
-                    if (class_exists($cls_new)) {
-                        try { (new $cls_new())->add_customer($customer, $newPlan); } catch (Throwable $e) {}
+            }
+
+            $dvc_new = Package::getDevice($newPlan);
+            if (file_exists($dvc_new)) {
+                require_once $dvc_new;
+                $cls_new = $newPlan['device'];
+                if (class_exists($cls_new)) {
+                    try {
+                        (new $cls_new())->add_customer($customer, $newPlan);
+                    } catch (Throwable $e) {
                     }
                 }
             }
@@ -345,8 +380,12 @@ switch ($action) {
 
     case 'admin_prepaid_extend':
         $admin = require_admin_session($api_secret, ['SuperAdmin', 'Admin', 'Agent']);
-        $id   = (int)_req('id');
-        $days = max(1, (int)(_req('days') ?: 3));
+        if (strtolower((string) ($_app_stage ?? '')) === 'demo') {
+            api_out(false, 'You cannot perform this action in Demo mode', null, 403);
+        }
+
+        $id   = (int) _req('id');
+        $days = max(1, (int) (_req('days') ?: 3));
 
         $tur = ORM::for_table('tbl_user_recharges')->find_one($id);
         if (!$tur) {
@@ -370,12 +409,15 @@ switch ($action) {
 
         if (class_exists('Package') && method_exists('Package', 'getDevice')) {
             $dvc = Package::getDevice($p);
-            if (($_app_stage ?? '') !== 'demo' && file_exists($dvc)) {
+            if (file_exists($dvc)) {
                 require_once $dvc;
                 $isChangePlan = true;
-                $cls = $p['device'];
+                $cls          = $p['device'];
                 if (class_exists($cls)) {
-                    try { (new $cls())->add_customer($c, $p); } catch (Throwable $e) {}
+                    try {
+                        (new $cls())->add_customer($c, $p);
+                    } catch (Throwable $e) {
+                    }
                 }
             }
         }
@@ -388,27 +430,33 @@ switch ($action) {
         api_out(true, "Masa aktif {$tur['username']} berhasil diperpanjang $days hari hingga $expiration.", $tur->as_array());
         break;
 
+    // =========================================================================
+    // 4. TOP-UP SALDO PELANGGAN (DEPOSIT)
+    // =========================================================================
     case 'admin_deposit':
-        // 100% Mengikuti alur resmi system/controllers/plan.php (case 'deposit-post') & Package::rechargeBalance
-        // + Pengiriman notifikasi Telegram Admin & WhatsApp Pelanggan
         $admin = require_admin_session($api_secret);
+        if (strtolower((string) ($_app_stage ?? '')) === 'demo') {
+            api_out(false, 'You cannot perform this action in Demo mode', null, 403);
+        }
         @set_time_limit(60);
         ensure_official_payment_notif_channel();
 
-        $user_id    = (int)(_post('customer_id') ?: _post('id_customer'));
-        $plan_id    = (int)(_post('plan_id') ?: _post('id_plan'));
-        $custom_amt = (float)_post('amount');
-        $note       = trim(_post('note') ?: '');
+        $user_id    = (int) (_post('customer_id') ?: _post('id_customer'));
+        $plan_id    = (int) (_post('plan_id') ?: _post('id_plan'));
+        $custom_amt = (float) _post('amount');
+        $note       = trim((string) (_post('note') ?: ''));
 
         $c = ORM::for_table('tbl_customers')->find_one($user_id);
         if (!$c) {
             api_out(false, 'Pelanggan tidak ditemukan.', null, 404);
         }
 
-        $prev_bal = (float)($c['balance'] ?? 0);
-
+        $prev_bal = (float) ($c['balance'] ?? 0);
         if (function_exists('run_hook')) {
-            try { @run_hook('deposit_customer'); } catch (Throwable $e) {}
+            try {
+                @run_hook('deposit_customer');
+            } catch (Throwable $e) {
+            }
         }
 
         $admin_name = $admin['fullname'] ?: $admin['username'];
@@ -418,9 +466,9 @@ switch ($action) {
         $price_amt  = 0.0;
 
         // Tahan sementara notifikasi bawaan di dalam rechargeBalance agar tidak terkirim ganda,
-        // lalu kita kirimkan secara pasti menggunakan Message::sendTelegram & Message::sendWhatsapp di bawah.
-        $orig_notif_pay = $config['user_notification_payment'] ?? 'wa';
-        $orig_tg_bot    = $config['telegram_bot'] ?? '';
+        // lalu kirimkan secara asinkron pasca-respon lewat queue_post_response_task.
+        $orig_notif_pay                      = $config['user_notification_payment'] ?? 'wa';
+        $orig_tg_bot                         = $config['telegram_bot'] ?? '';
         $config['user_notification_payment'] = 'none';
         $_c['user_notification_payment']     = 'none';
         $config['telegram_bot']              = '';
@@ -429,15 +477,14 @@ switch ($action) {
         @ob_start();
         try {
             if ($custom_amt != 0) {
-                $plan = [
+                $plan       = [
                     'name_plan' => class_exists('Lang') ? Lang::T('Balance') : 'Balance',
                     'price'     => $custom_amt
                 ];
                 $plan_label = $plan['name_plan'];
                 $price_amt  = $custom_amt;
-
                 if (class_exists('Package') && method_exists('Package', 'rechargeBalance')) {
-                    $trxId = (int)Package::rechargeBalance($c, $plan, 'Deposit', $admin_name, $note);
+                    $trxId = (int) Package::rechargeBalance($c, $plan, 'Deposit', $admin_name, $note);
                 }
             } elseif ($plan_id > 0) {
                 $p = ORM::for_table('tbl_plans')->find_one($plan_id);
@@ -446,43 +493,48 @@ switch ($action) {
                     api_out(false, 'Paket Saldo tidak ditemukan.', null, 404);
                 }
                 $plan_label = $p['name_plan'];
-                $price_amt  = (float)$p['price'];
-
+                $price_amt  = (float) $p['price'];
                 if (class_exists('Package') && method_exists('Package', 'rechargeBalance')) {
-                    $trxId = (int)Package::rechargeBalance($c, $p, 'Deposit', $admin_name, $note);
+                    $trxId = (int) Package::rechargeBalance($c, $p, 'Deposit', $admin_name, $note);
                 }
             } else {
                 @ob_end_clean();
                 api_out(false, 'Pilih paket saldo atau masukkan nominal top-up terlebih dahulu.', null, 400);
             }
-        } catch (Throwable $e) {}
+        } catch (Throwable $e) {
+        }
         @ob_end_clean();
 
         // Kembalikan konfigurasi Telegram & Notifikasi Pelanggan
-        $config['user_notification_payment']           = $orig_notif_pay;
-        $_c['user_notification_payment']               = $orig_notif_pay;
+        $config['user_notification_payment']            = $orig_notif_pay;
+        $_c['user_notification_payment']                = $orig_notif_pay;
         $GLOBALS['config']['user_notification_payment'] = $orig_notif_pay;
         $GLOBALS['_c']['user_notification_payment']     = $orig_notif_pay;
-
-        $config['telegram_bot']           = $orig_tg_bot;
-        $_c['telegram_bot']               = $orig_tg_bot;
-        $GLOBALS['config']['telegram_bot'] = $orig_tg_bot;
-        $GLOBALS['_c']['telegram_bot']     = $orig_tg_bot;
+        $config['telegram_bot']                         = $orig_tg_bot;
+        $_c['telegram_bot']                             = $orig_tg_bot;
+        $GLOBALS['config']['telegram_bot']              = $orig_tg_bot;
+        $GLOBALS['_c']['telegram_bot']                  = $orig_tg_bot;
 
         if ($trxId > 0) {
             $c_fresh = ORM::for_table('tbl_customers')->find_one($user_id);
-            $new_bal = $c_fresh ? (float)$c_fresh['balance'] : ($prev_bal + $price_amt);
-            $in = ORM::for_table('tbl_transactions')->find_one($trxId);
-
-            $in_arr = $in ? $in->as_array() : [
-                'id' => $trxId, 'invoice' => 'INV-' . $trxId, 'username' => $c['username'],
-                'plan_name' => $plan_label, 'price' => $price_amt,
-                'recharged_on' => date('Y-m-d'), 'recharged_time' => date('H:i:s'),
-                'expiration' => date('Y-m-d'), 'time' => date('H:i:s'),
-                'method' => 'Deposit - ' . $admin_name, 'routers' => 'balance', 'type' => 'Balance'
+            $new_bal = $c_fresh ? (float) $c_fresh['balance'] : ($prev_bal + $price_amt);
+            $in      = ORM::for_table('tbl_transactions')->find_one($trxId);
+            $in_arr  = $in ? $in->as_array() : [
+                'id'             => $trxId,
+                'invoice'        => 'INV-' . $trxId,
+                'username'       => $c['username'],
+                'plan_name'      => $plan_label,
+                'price'          => $price_amt,
+                'recharged_on'   => date('Y-m-d'),
+                'recharged_time' => date('H:i:s'),
+                'expiration'     => date('Y-m-d'),
+                'time'           => date('H:i:s'),
+                'method'         => 'Deposit - ' . $admin_name,
+                'routers'        => 'balance',
+                'type'           => 'Balance'
             ];
 
-            $receipt = build_web_invoice_receipt($in_arr, $c_fresh ?: $c, $config, $note);
+            $receipt      = build_web_invoice_receipt($in_arr, $c_fresh ?: $c, $config, $note);
             $prev_bal_fmt = (class_exists('Lang') && method_exists('Lang', 'moneyFormat'))
                 ? Lang::moneyFormat($prev_bal)
                 : ($currency . ' ' . number_format($prev_bal, 0, ',', '.'));
@@ -490,7 +542,7 @@ switch ($action) {
             write_admin_log($admin, '[' . $admin['username'] . ']: Deposit ' . $c['username'] . ' [' . $plan_label . '][' . $receipt['price_formatted'] . ']');
             unset($_SESSION['notify'], $_SESSION['ntype']);
 
-            // 1. Kirim Notifikasi Telegram Admin menggunakan Message::sendTelegram() resmi
+            // 1. Kirim Notifikasi Telegram Admin (non-blocking)
             $tg_msg = "#u{$c['username']} {$c['fullname']} #deposit #Balance \n"
                 . "{$plan_label}\n"
                 . "Router: balance\n"
@@ -500,17 +552,17 @@ switch ($action) {
                 . "New Balance: {$receipt['balance_formatted']}\n"
                 . "Price: {$receipt['price_formatted']}\n"
                 . "Note: {$note}";
-            notify_telegram_admin($tg_msg);
+            notify_telegram_admin($tg_msg, true);
 
-            // 2. Kirim Notifikasi WhatsApp / SMS ke Pelanggan menggunakan Message::sendWhatsapp() resmi
-            $cust_phone = trim((string)(($c_fresh ? $c_fresh['phonenumber'] : $c['phonenumber']) ?? ''));
-            $wa_text    = trim((string)($receipt['wa_web_text'] ?? ''));
+            // 2. Kirim Notifikasi WhatsApp / SMS ke Pelanggan (non-blocking)
+            $cust_phone = trim((string) (($c_fresh ? $c_fresh['phonenumber'] : $c['phonenumber']) ?? ''));
+            $wa_text    = trim((string) ($receipt['wa_web_text'] ?? ''));
             if ($cust_phone !== '' && $wa_text !== '') {
-                $notif_mode = strtolower(trim((string)($config['user_notification_payment'] ?? 'wa')));
+                $notif_mode = strtolower(trim((string) ($config['user_notification_payment'] ?? 'wa')));
                 if ($notif_mode === 'sms') {
-                    notify_sms_customer($cust_phone, $wa_text);
+                    notify_sms_customer($cust_phone, $wa_text, true);
                 } elseif ($notif_mode === 'wa' || !empty($config['wa_url'])) {
-                    notify_whatsapp_customer($cust_phone, $wa_text);
+                    notify_whatsapp_customer($cust_phone, $wa_text, true);
                 }
             }
 
@@ -524,23 +576,26 @@ switch ($action) {
         }
         break;
 
+    // =========================================================================
+    // 5. VOUCHER HOTSPOT / PPPOE (LIST, GENERATE, DELETE & REFILL)
+    // =========================================================================
     case 'admin_vouchers':
-        $admin = require_admin_session($api_secret);
-        $search = trim(_req('search'));
-        $router = trim(_req('router'));
-        $plan   = (int)_req('plan');
-        $status = trim((string)_req('status'));
-        $limit  = max(20, min(500, (int)(_req('limit') ?: 200)));
+        $admin      = require_admin_session($api_secret);
+        $router     = trim((string) _req('router'));
+        $status     = trim((string) _req('status'));
+        $plan       = (int) _req('plan');
+        $batch_name = trim((string) _req('batch_name'));
+        $search     = trim((string) _req('search'));
+        $limit      = max(20, min(300, (int) (_req('limit') ?: 150)));
 
         $plans_map = [];
         foreach (ORM::for_table('tbl_plans')->find_array() as $p) {
-            $plans_map[(int)$p['id']] = $p;
+            $plans_map[(int) $p['id']] = $p;
         }
-
         $admins_map = [];
         foreach (ORM::for_table('tbl_users')->find_array() as $u) {
-            $t_badge = ($u['user_type'] === 'Sales') ? ' [S]' : (($u['user_type'] === 'Agent') ? ' [A]' : '');
-            $admins_map[(int)$u['id']] = $u['fullname'] . $t_badge;
+            $t_badge                    = ($u['user_type'] === 'Sales') ? ' [S]' : (($u['user_type'] === 'Agent') ? ' [A]' : '');
+            $admins_map[(int) $u['id']] = $u['fullname'] . $t_badge;
         }
 
         $q = ORM::for_table('tbl_voucher')->order_by_desc('id');
@@ -553,26 +608,32 @@ switch ($action) {
         if ($plan > 0) {
             $q->where('id_plan', $plan);
         }
+        if ($batch_name !== '') {
+            $q->where('batch_name', $batch_name);
+        }
         if ($search !== '') {
             $q->where_like('code', '%' . $search . '%');
         }
         if ($admin['user_type'] === 'Agent') {
-            $sales = [$admin['id']];
+            $sales = [(int) $admin['id']];
             foreach (ORM::for_table('tbl_users')->select('id')->where('root', $admin['id'])->find_array() as $s) {
-                $sales[] = (int)$s['id'];
+                $sales[] = (int) $s['id'];
             }
             $q->where_in('generated_by', $sales);
+        } elseif ($admin['user_type'] === 'Sales') {
+            $q->where('generated_by', (int) $admin['id']);
         }
 
-        $rows = $q->limit($limit)->find_array();
+        $rows     = $q->limit($limit)->find_array();
         $vouchers = [];
         foreach ($rows as $r) {
-            $p = $plans_map[(int)$r['id_plan']] ?? null;
+            $p                      = $plans_map[(int) $r['id_plan']] ?? null;
             $r['name_plan']         = $p['name_plan'] ?? '-';
-            $r['price']             = isset($p['price']) ? (float)$p['price'] : 0.0;
+            $r['price']             = isset($p['price']) ? (float) $p['price'] : 0.0;
             $r['validity']          = $p ? ($p['validity'] . ' ' . $p['validity_unit']) : '-';
-            $r['generated_by_name'] = $admins_map[(int)($r['generated_by'] ?? 0)] ?? 'System';
-            $vouchers[] = $r;
+            $r['generated_by_name'] = $admins_map[(int) ($r['generated_by'] ?? 0)] ?? 'System';
+            $r['batch_name']        = $r['batch_name'] ?? '';
+            $vouchers[]             = $r;
         }
 
         api_out(true, 'Daftar voucher dimuat', [
@@ -583,13 +644,18 @@ switch ($action) {
 
     case 'admin_voucher_generate':
         $admin = require_admin_session($api_secret, ['SuperAdmin', 'Admin', 'Agent', 'Sales']);
-        $type           = trim(_post('type') ?: 'Hotspot');
-        $plan_id        = (int)(_post('plan_id') ?: _post('plan'));
-        $server         = trim(_post('server') ?: _post('routers'));
-        $count          = max(1, min(500, (int)(_post('count') ?: _post('numbervoucher') ?: 10)));
-        $voucher_format = trim(_post('voucher_format') ?: 'up'); // up | low | rand | numbers
-        $prefix         = trim((string)_post('prefix'));
-        $len            = max(4, min(16, (int)(_post('length_code') ?: _post('lengthcode') ?: 6)));
+        if (strtolower((string) ($_app_stage ?? '')) === 'demo') {
+            api_out(false, 'You cannot perform this action in Demo mode', null, 403);
+        }
+
+        $type           = trim((string) (_post('type') ?: 'Hotspot'));
+        $plan_id        = (int) (_post('plan_id') ?: _post('plan'));
+        $server         = trim((string) (_post('server') ?: _post('routers')));
+        $count          = max(1, min(500, (int) (_post('count') ?: _post('numbervoucher') ?: 10)));
+        $voucher_format = trim((string) (_post('voucher_format') ?: 'up')); // up | low | rand | numbers
+        $prefix         = trim((string) _post('prefix'));
+        $batch_name     = trim((string) _post('batch_name'));
+        $len            = max(4, min(16, (int) (_post('length_code') ?: _post('lengthcode') ?: 6)));
 
         $p = ORM::for_table('tbl_plans')->find_one($plan_id);
         if (!$p) {
@@ -607,7 +673,7 @@ switch ($action) {
             $cfg_pref->value = $prefix;
             $cfg_pref->save();
         } else {
-            $cfg_pref = ORM::for_table('tbl_appconfig')->create();
+            $cfg_pref          = ORM::for_table('tbl_appconfig')->create();
             $cfg_pref->setting = 'voucher_prefix';
             $cfg_pref->value   = $prefix;
             $cfg_pref->save();
@@ -615,7 +681,10 @@ switch ($action) {
         $config['voucher_prefix'] = $prefix;
 
         if (function_exists('run_hook')) {
-            try { @run_hook('create_voucher'); } catch (Throwable $e) {}
+            try {
+                @run_hook('create_voucher');
+            } catch (Throwable $e) {
+            }
         }
 
         $generated_codes = [];
@@ -623,10 +692,10 @@ switch ($action) {
             if (function_exists('generateUniqueNumericVouchers')) {
                 $generated_codes = generateUniqueNumericVouchers($count, $len);
             } else {
-                $min_n = (int)str_pad('1', $len, '0');
-                $max_n = (int)str_pad('9', $len, '9');
+                $min_n = (int) str_pad('1', $len, '0');
+                $max_n = (int) str_pad('9', $len, '9');
                 for ($i = 0; $i < $count; $i++) {
-                    $generated_codes[] = (string)mt_rand($min_n, $max_n);
+                    $generated_codes[] = (string) mt_rand($min_n, $max_n);
                 }
             }
         } else {
@@ -642,6 +711,7 @@ switch ($action) {
                         foreach ($chars as &$ch) {
                             $ch = (mt_rand(0, 1) === 1) ? strtolower($ch) : strtoupper($ch);
                         }
+                        unset($ch);
                         $code = implode('', $chars);
                     }
                 }
@@ -652,8 +722,10 @@ switch ($action) {
         $created = [];
         foreach ($generated_codes as $raw_code) {
             $full_code = $prefix . $raw_code;
-            if (ORM::for_table('tbl_voucher')->where('code', $full_code)->find_one()) continue;
-            $v = ORM::for_table('tbl_voucher')->create();
+            if (ORM::for_table('tbl_voucher')->where('code', $full_code)->find_one()) {
+                continue;
+            }
+            $v               = ORM::for_table('tbl_voucher')->create();
             $v->type         = $p['type'] ?: $type;
             $v->routers      = $server;
             $v->id_plan      = $p['id'];
@@ -661,7 +733,11 @@ switch ($action) {
             $v->user         = '0';
             $v->status       = '0';
             $v->generated_by = $admin['id'];
-            if (array_key_exists('created_at', $v->as_array())) {
+            $v_cols          = $v->as_array();
+            if ($batch_name !== '' && array_key_exists('batch_name', $v_cols)) {
+                $v->batch_name = $batch_name;
+            }
+            if (array_key_exists('created_at', $v_cols)) {
                 $v->created_at = date('Y-m-d H:i:s');
             }
             $v->save();
@@ -674,12 +750,20 @@ switch ($action) {
 
     case 'admin_voucher_delete':
         require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
-        if (function_exists('run_hook')) {
-            try { @run_hook('delete_voucher'); } catch (Throwable $e) {}
+        if (strtolower((string) ($_app_stage ?? '')) === 'demo') {
+            api_out(false, 'You cannot perform this action in Demo mode', null, 403);
         }
-        $id          = (int)_req('id');
-        $delete_used = (int)_req('delete_used');
-        $older_3m    = (int)_req('older_than_3months');
+
+        if (function_exists('run_hook')) {
+            try {
+                @run_hook('delete_voucher');
+            } catch (Throwable $e) {
+            }
+        }
+
+        $id          = (int) _req('id');
+        $delete_used = (int) _req('delete_used');
+        $older_3m    = (int) _req('older_than_3months');
         $ids_arr     = $_POST['voucher_ids'] ?? null;
 
         if (is_array($ids_arr) && !empty($ids_arr)) {
@@ -691,7 +775,7 @@ switch ($action) {
         if ($delete_used === 1) {
             if ($older_3m === 1) {
                 $time3months = strtotime('-3 months');
-                $d_list = ORM::for_table('tbl_voucher')
+                $d_list      = ORM::for_table('tbl_voucher')
                     ->where('status', '1')
                     ->where_raw("UNIX_TIMESTAMP(used_date) < $time3months")
                     ->find_many();
@@ -710,24 +794,31 @@ switch ($action) {
         }
 
         $v = ORM::for_table('tbl_voucher')->find_one($id);
-        if (!$v) api_out(false, 'Voucher tidak ditemukan.', null, 404);
+        if (!$v) {
+            api_out(false, 'Voucher tidak ditemukan.', null, 404);
+        }
         $v->delete();
         api_out(true, class_exists('Lang') ? Lang::T('Data Deleted Successfully') : 'Voucher berhasil dihapus.');
         break;
 
     case 'admin_voucher_refill':
         $admin = require_admin_session($api_secret);
+        if (strtolower((string) ($_app_stage ?? '')) === 'demo') {
+            api_out(false, 'You cannot perform this action in Demo mode', null, 403);
+        }
         @set_time_limit(60);
         ensure_official_payment_notif_channel();
 
-        $customer_id = (int)(_post('customer_id') ?: _post('id_customer'));
-        $raw_code    = trim(_post('code'));
+        $customer_id = (int) (_post('customer_id') ?: _post('id_customer'));
+        $raw_code    = trim((string) _post('code'));
         $code        = (class_exists('Text') && method_exists('Text', 'alphanumeric'))
             ? Text::alphanumeric($raw_code, "-_.,")
             : $raw_code;
 
         $user = ORM::for_table('tbl_customers')->where('id', $customer_id)->find_one();
-        if (!$user) api_out(false, 'Pilih pelanggan terlebih dahulu.', null, 404);
+        if (!$user) {
+            api_out(false, 'Pilih pelanggan terlebih dahulu.', null, 404);
+        }
 
         $v1 = ORM::for_table('tbl_voucher')->where_raw("BINARY code = ?", [$code])->where('status', 0)->find_one();
         if (!$v1) {
@@ -735,7 +826,10 @@ switch ($action) {
         }
 
         if (function_exists('run_hook')) {
-            try { @run_hook('refill_customer'); } catch (Throwable $e) {}
+            try {
+                @run_hook('refill_customer');
+            } catch (Throwable $e) {
+            }
         }
 
         $ok_refill = false;
@@ -743,13 +837,14 @@ switch ($action) {
         if (class_exists('Package') && method_exists('Package', 'rechargeUser')) {
             try {
                 $ok_refill = Package::rechargeUser($user['id'], $v1['routers'], $v1['id_plan'], 'Voucher', $code);
-            } catch (Throwable $e) {}
+            } catch (Throwable $e) {
+            }
         }
         @ob_end_clean();
 
         if ($ok_refill) {
-            $v1->status    = '1';
-            $v1->user      = $user['username'];
+            $v1->status = '1';
+            $v1->user   = $user['username'];
             if (array_key_exists('used_date', $v1->as_array())) {
                 $v1->used_date = date('Y-m-d H:i:s');
             }
@@ -757,27 +852,40 @@ switch ($action) {
 
             $in = ORM::for_table('tbl_transactions')->where('username', $user['username'])->order_by_desc('id')->find_one();
             unset($_SESSION['notify'], $_SESSION['ntype']);
+
             $in_arr = $in ? $in->as_array() : [
-                'id' => 0, 'invoice' => 'VCR-' . $code, 'username' => $user['username'],
-                'plan_name' => 'Voucher ' . $code, 'price' => 0,
-                'recharged_on' => date('Y-m-d'), 'recharged_time' => date('H:i:s'),
-                'expiration' => date('Y-m-d'), 'time' => date('H:i:s'),
-                'method' => 'Voucher - ' . $code, 'routers' => $v1['routers'], 'type' => $v1['type']
+                'id'             => 0,
+                'invoice'        => 'VCR-' . $code,
+                'username'       => $user['username'],
+                'plan_name'      => 'Voucher ' . $code,
+                'price'          => 0,
+                'recharged_on'   => date('Y-m-d'),
+                'recharged_time' => date('H:i:s'),
+                'expiration'     => date('Y-m-d'),
+                'time'           => date('H:i:s'),
+                'method'         => 'Voucher - ' . $code,
+                'routers'        => $v1['routers'],
+                'type'           => $v1['type']
             ];
+
             api_out(true, 'Voucher ' . $code . ' berhasil diaktifkan ke ' . $user['fullname'] . '!', [
                 'invoice' => $in_arr,
                 'receipt' => build_web_invoice_receipt($in_arr, $user, $config)
             ]);
         }
+
         api_out(false, 'Gagal mengaktifkan voucher ke Router.', null, 500);
         break;
 
+    // =========================================================================
+    // 6. KIRIM ULANG INVOICE WHATSAPP RESMI WEB
+    // =========================================================================
     case 'admin_resend_invoice_wa':
-        $admin = require_admin_session($api_secret);
-        $trx_id   = (int)_post('trx_id');
-        $invoice  = trim(_post('invoice'));
-        $username = trim(_post('username'));
-        $note     = trim(_post('note'));
+        $admin    = require_admin_session($api_secret);
+        $trx_id   = (int) _post('trx_id');
+        $invoice  = trim((string) _post('invoice'));
+        $username = trim((string) _post('username'));
+        $note     = trim((string) _post('note'));
 
         $in = null;
         if ($trx_id > 0) {
@@ -793,19 +901,20 @@ switch ($action) {
             api_out(false, 'Data transaksi invoice tidak ditemukan.', null, 404);
         }
 
-        $cust = ORM::for_table('tbl_customers')->where('username', $in['username'])->find_one();
+        $cust     = ORM::for_table('tbl_customers')->where('username', $in['username'])->find_one();
         $cust_arr = $cust ? $cust->as_array() : [
             'id'          => 0,
             'username'    => $in['username'],
             'fullname'    => $in['username'],
-            'phonenumber' => _post('phonenumber')
+            'phonenumber' => trim((string) _post('phonenumber'))
         ];
-        $receipt = build_web_invoice_receipt($in->as_array(), $cust_arr, $config, $note);
-        $phone   = trim($cust_arr['phonenumber'] ?? '');
 
+        $receipt          = build_web_invoice_receipt($in->as_array(), $cust_arr, $config, $note);
+        $phone            = trim((string) ($cust_arr['phonenumber'] ?? ''));
         $sent_via_gateway = false;
-        if (!empty($phone) && !empty($config['wa_url']) && !empty($receipt['wa_web_text'])) {
-            notify_whatsapp_customer($phone, $receipt['wa_web_text']);
+
+        if ($phone !== '' && !empty($config['wa_url']) && !empty($receipt['wa_web_text'])) {
+            notify_whatsapp_customer($phone, $receipt['wa_web_text'], false);
             $sent_via_gateway = true;
         }
 
