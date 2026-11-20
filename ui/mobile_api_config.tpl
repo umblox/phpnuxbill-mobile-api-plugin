@@ -2,51 +2,53 @@
 
 {literal}
 <style>
-    .api-stat-box {
-        border-radius: 8px;
-        padding: 16px;
-        color: #fff;
-        margin-bottom: 18px;
-        box-shadow: 0 2px 6px rgba(0,0,0,0.12);
-    }
-    .api-stat-box h3 {
-        margin: 0 0 4px 0;
-        font-weight: 800;
-        font-size: 22px;
-    }
-    .api-stat-box p {
-        margin: 0;
-        font-size: 12.5px;
-        opacity: 0.9;
-    }
-    .bg-navy-card { background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%); }
-    .bg-teal-card { background: linear-gradient(135deg, #0ba360 0%, #3cba92 100%); }
-    .bg-amber-card { background: linear-gradient(135deg, #f12711 0%, #f5af19 100%); }
-    .bg-purple-card { background: linear-gradient(135deg, #5f2c82 0%, #49a09d 100%); }
-    .endpoint-box {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        background: #f8fafc;
-        border: 1px solid #cbd5e1;
-        border-radius: 6px;
-        padding: 8px 12px;
-        font-family: monospace;
-        font-size: 13px;
-        color: #0f172a;
-        word-break: break-all;
-    }
-    .gw-badge {
-        display: inline-block;
-        padding: 5px 10px;
-        border-radius: 4px;
-        font-size: 12px;
-        font-weight: 600;
-        margin-right: 6px;
-        margin-bottom: 6px;
-    }
-    .gw-on { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
-    .gw-off { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+.api-stat-box {
+    border-radius: 8px;
+    padding: 16px;
+    color: #fff;
+    margin-bottom: 18px;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+}
+.api-stat-box h3 {
+    margin: 0 0 4px 0;
+    font-weight: 800;
+    font-size: 22px;
+}
+.api-stat-box p {
+    margin: 0;
+    font-size: 12.5px;
+    opacity: 0.9;
+}
+.bg-navy-card { background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%); }
+.bg-teal-card { background: linear-gradient(135deg, #0ba360 0%, #3cba92 100%); }
+.bg-amber-card { background: linear-gradient(135deg, #f12711 0%, #f5af19 100%); }
+.bg-purple-card { background: linear-gradient(135deg, #5f2c82 0%, #49a09d 100%); }
+
+.endpoint-box {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    background: #f8fafc;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-family: monospace;
+    font-size: 13px;
+    color: #0f172a;
+    word-break: break-all;
+}
+.gw-badge {
+    display: inline-block;
+    padding: 5px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    margin-right: 6px;
+    margin-bottom: 6px;
+}
+.gw-on { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
+.gw-off { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
 </style>
 {/literal}
 
@@ -59,7 +61,7 @@
     </div>
     <div class="col-md-3 col-sm-6">
         <div class="api-stat-box bg-teal-card">
-            <h3>{$modules|@count} Modul</h3>
+            <h3>{$ready_modules_count|default:$modules|@count} / {$modules|@count} Modul</h3>
             <p><i class="glyphicon glyphicon-ok-circle"></i> Modular Engine Ready</p>
         </div>
     </div>
@@ -82,7 +84,11 @@
         <div class="panel panel-hovered mb20 panel-primary">
             <div class="panel-heading">
                 <div class="pull-right">
-                    <span class="label label-success">Status: Online &amp; Active</span>
+                    {if $ready_modules_count|default:0 == $modules|@count}
+                        <span class="label label-success">Status: Online &amp; Active</span>
+                    {else}
+                        <span class="label label-warning">Status: Incomplete Modules</span>
+                    {/if}
                 </div>
                 <i class="glyphicon glyphicon-link"></i> Konfigurasi Endpoint &amp; Integrasi Notifikasi Resmi Web
             </div>
@@ -91,15 +97,15 @@
                     <table class="table table-bordered">
                         <tbody>
                             <tr>
-                                <th width="250" style="vertical-align: middle;">URL Server di Aplikasi Android</th>
+                                <th width="260" style="vertical-align: middle;">URL Server di Aplikasi Android</th>
                                 <td>
                                     <div class="endpoint-box">
                                         <span id="rootUrlText">{$app_root_url}</span>
-                                        <button type="button" class="btn btn-xs btn-primary" onclick="copyText('rootUrlText')">
+                                        <button type="button" class="btn btn-xs btn-primary" onclick="copyText('rootUrlText', this)">
                                             <i class="glyphicon glyphicon-copy"></i> Salin URL Server
                                         </button>
                                     </div>
-                                    <small class="text-muted">Masukkan URL di atas pada pengaturan Server di aplikasi Android PHPNuxBill.</small>
+                                    <small class="text-muted">Masukkan URL dasar di atas pada pengaturan Server di aplikasi Android PHPNuxBill.</small>
                                 </td>
                             </tr>
                             <tr>
@@ -107,21 +113,23 @@
                                 <td>
                                     <div class="endpoint-box">
                                         <span id="primaryApiText">{$app_root_url}/system/api.php?r=plugin/mobile_api</span>
-                                        <button type="button" class="btn btn-xs btn-info" onclick="copyText('primaryApiText')">
+                                        <button type="button" class="btn btn-xs btn-info" onclick="copyText('primaryApiText', this)">
                                             <i class="glyphicon glyphicon-copy"></i> Salin Endpoint
                                         </button>
                                     </div>
+                                    <small class="text-muted">Gerbang API resmi bawaan PHPNuxBill (terisolasi dari sesi web browser sehingga tidak membebani web).</small>
                                 </td>
                             </tr>
                             <tr>
-                                <th style="vertical-align: middle;">Endpoint Rute Plugin</th>
+                                <th style="vertical-align: middle;">Endpoint Rute Plugin (Fallback Firewall)</th>
                                 <td>
                                     <div class="endpoint-box">
                                         <span id="pluginRouteText">{$app_root_url}/?_route=plugin/mobile_api</span>
-                                        <button type="button" class="btn btn-xs btn-default" onclick="copyText('pluginRouteText')">
+                                        <button type="button" class="btn btn-xs btn-default" onclick="copyText('pluginRouteText', this)">
                                             <i class="glyphicon glyphicon-copy"></i> Salin Rute
                                         </button>
                                     </div>
+                                    <small class="text-muted">Digunakan otomatis oleh aplikasi apabila server mengaktifkan aturan <code>.htaccess_firewall</code>.</small>
                                 </td>
                             </tr>
                             <tr>
@@ -156,6 +164,7 @@
                 <h4 style="margin-top: 20px; margin-bottom: 12px; font-weight: bold;">
                     <i class="glyphicon glyphicon-th-list"></i> Daftar Modul Aktif (<code>system/plugin/mobile_api_modules/</code>)
                 </h4>
+
                 <div class="table-responsive">
                     <table class="table table-bordered table-striped table-hover">
                         <thead>
@@ -164,22 +173,28 @@
                                 <th width="260">Nama File Modul</th>
                                 <th>Fungsi &amp; Cakupan Fitur</th>
                                 <th width="95" class="text-right">Ukuran</th>
-                                <th width="130" class="text-center">Status</th>
+                                <th width="140" class="text-center">Status</th>
                             </tr>
                         </thead>
                         <tbody>
                             {foreach $modules as $idx => $mod}
-                            <tr>
-                                <td class="text-center">{$idx + 1}</td>
-                                <td><code>{$mod.name|escape:'html'}</code></td>
-                                <td>{$mod.description|escape:'html'}</td>
-                                <td class="text-right"><small class="text-muted">{$mod.size}</small></td>
-                                <td class="text-center"><span class="label label-success">Loaded &amp; Ready</span></td>
-                            </tr>
+                                <tr>
+                                    <td class="text-center">{$idx + 1}</td>
+                                    <td><code>{$mod.name|escape:'html'}</code></td>
+                                    <td>{$mod.description|escape:'html'}</td>
+                                    <td class="text-right"><small class="text-muted">{$mod.size}</small></td>
+                                    <td class="text-center">
+                                        {if $mod.is_ready|default:true}
+                                            <span class="label label-success">Loaded &amp; Ready</span>
+                                        {else}
+                                            <span class="label label-danger">Missing / Empty</span>
+                                        {/if}
+                                    </td>
+                                </tr>
                             {foreachelse}
-                            <tr>
-                                <td colspan="5" class="text-center text-danger">Folder <code>mobile_api_modules/</code> belum ditemukan.</td>
-                            </tr>
+                                <tr>
+                                    <td colspan="5" class="text-center text-danger">Folder <code>mobile_api_modules/</code> belum ditemukan.</td>
+                                </tr>
                             {/foreach}
                         </tbody>
                     </table>
@@ -191,12 +206,23 @@
 
 {literal}
 <script>
-function copyText(elementId) {
-    var txt = document.getElementById(elementId).innerText;
-    if (navigator.clipboard) {
-        navigator.clipboard.writeText(txt).then(function() {
-            alert('Disalin ke clipboard:\n' + txt);
-        });
+function copyText(elementId, btnEl) {
+    var el = document.getElementById(elementId);
+    if (!el) return;
+    var txt = el.innerText || el.textContent;
+
+    var showFeedback = function() {
+        if (!btnEl) return;
+        var originalHtml = btnEl.getAttribute('data-orig-html') || btnEl.innerHTML;
+        btnEl.setAttribute('data-orig-html', originalHtml);
+        btnEl.innerHTML = '<i class="glyphicon glyphicon-ok"></i> Tersalin!';
+        setTimeout(function() {
+            btnEl.innerHTML = originalHtml;
+        }, 1800);
+    };
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(txt).then(showFeedback);
     } else {
         var temp = document.createElement('textarea');
         temp.value = txt;
@@ -204,7 +230,7 @@ function copyText(elementId) {
         temp.select();
         document.execCommand('copy');
         document.body.removeChild(temp);
-        alert('Disalin ke clipboard:\n' + txt);
+        showFeedback();
     }
 }
 </script>
