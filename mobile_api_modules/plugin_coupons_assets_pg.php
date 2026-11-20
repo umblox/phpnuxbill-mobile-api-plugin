@@ -1,13 +1,15 @@
 <?php
+
 /**
  * PHPNuxBill Mobile API Plugin - Map, Coupons, Asset Manager & Payment Gateway Audit Module
  * Path: system/plugin/mobile_api_modules/plugin_coupons_assets_pg.php
- */
+ **/
 
-global $config, $_c, $admin, $ui, $UPLOAD_PATH, $DEVICE_PATH, $PAYMENTGATEWAY_PATH, $phpnux_root;
+global $config, $_c, $admin, $ui, $UPLOAD_PATH, $DEVICE_PATH, $PAYMENTGATEWAY_PATH, $phpnux_root, $_app_stage, $api_secret;
 
 if (!function_exists('get_valid_payment_gateway_names')) {
-    function get_valid_payment_gateway_names($pg_dir, $config) {
+    function get_valid_payment_gateway_names($pg_dir, $config)
+    {
         $known = [
             'viaqris'  => true,
             'tripay'   => true,
@@ -25,13 +27,11 @@ if (!function_exists('get_valid_payment_gateway_names')) {
             'nicepay'  => true,
             'stripe'   => true
         ];
-
-        $root_dir = !empty($GLOBALS['phpnux_root']) ? $GLOBALS['phpnux_root'] : dirname(__DIR__, 3);
+        $root_dir  = !empty($GLOBALS['phpnux_root']) ? $GLOBALS['phpnux_root'] : dirname(__DIR__, 3);
         $scan_dirs = [
             rtrim($pg_dir, '/\\'),
             $root_dir . DIRECTORY_SEPARATOR . ltrim(rtrim($pg_dir, '/\\'), '/\\')
         ];
-
         foreach ($scan_dirs as $dir) {
             if (is_dir($dir)) {
                 foreach (glob($dir . DIRECTORY_SEPARATOR . '*.php') ?: [] as $f) {
@@ -42,21 +42,19 @@ if (!function_exists('get_valid_payment_gateway_names')) {
                 }
             }
         }
-
-        $cfg_pgs = array_filter(array_map('trim', explode(',', strtolower((string)($config['payment_gateway'] ?? '')))));
+        $cfg_pgs = array_filter(array_map('trim', explode(',', strtolower((string) ($config['payment_gateway'] ?? '')))));
         foreach ($cfg_pgs as $g) {
             if ($g !== '' && $g !== 'none') {
                 $known[$g] = true;
             }
         }
-
         return $known;
     }
 }
 
 switch ($action) {
     // =========================================================================
-    // PETA, KUPON PROMO, ASSET MANAGER & AUDIT PAYMENT GATEWAY
+    // 1. DATA PETA KOORDINAT (PELANGGAN, ROUTER & ASET JARINGAN)
     // =========================================================================
     case 'map_all':
     case 'admin_map_data':
@@ -65,24 +63,28 @@ switch ($action) {
 
         $active_map = [];
         foreach (ORM::for_table('tbl_user_recharges')->find_array() as $r) {
-            $cid = (int)$r['customer_id'];
-            if (!isset($active_map[$cid]) || $r['status'] === 'on') $active_map[$cid] = $r;
+            $cid = (int) $r['customer_id'];
+            if (!isset($active_map[$cid]) || $r['status'] === 'on') {
+                $active_map[$cid] = $r;
+            }
         }
 
         $customers = [];
         foreach (ORM::for_table('tbl_customers')->where_not_equal('coordinates', '')->where_not_null('coordinates')->find_array() as $c) {
-            $p = array_map('trim', explode(',', $c['coordinates']));
-            if (count($p) < 2 || !is_numeric($p[0]) || !is_numeric($p[1])) continue;
-            $rech = $active_map[(int)$c['id']] ?? null;
+            $p = array_map('trim', explode(',', (string) $c['coordinates']));
+            if (count($p) < 2 || !is_numeric($p[0]) || !is_numeric($p[1])) {
+                continue;
+            }
+            $rech        = $active_map[(int) $c['id']] ?? null;
             $customers[] = [
-                'id'           => (int)$c['id'],
+                'id'           => (int) $c['id'],
                 'username'     => $c['username'] ?: '-',
                 'fullname'     => $c['fullname'] ?: $c['username'],
                 'phonenumber'  => $c['phonenumber'] ?: '-',
                 'address'      => str_replace(["\r", "\n"], ' ', $c['address'] ?: '-'),
                 'service_type' => $c['service_type'] ?: 'Hotspot',
-                'lat'          => (float)$p[0],
-                'lng'          => (float)$p[1],
+                'lat'          => (float) $p[0],
+                'lng'          => (float) $p[1],
                 'plan_status'  => $rech ? $rech['status'] : 'off',
                 'plan_name'    => $rech ? $rech['namebp'] : 'Non-Paket',
                 'expiration'   => $rech ? $rech['expiration'] : '-'
@@ -91,36 +93,45 @@ switch ($action) {
 
         $routers = [];
         foreach (ORM::for_table('tbl_routers')->find_array() as $r) {
-            if (empty($r['coordinates'])) continue;
-            $p = array_map('trim', explode(',', $r['coordinates']));
-            if (count($p) < 2 || !is_numeric($p[0]) || !is_numeric($p[1])) continue;
+            if (empty($r['coordinates'])) {
+                continue;
+            }
+            $p = array_map('trim', explode(',', (string) $r['coordinates']));
+            if (count($p) < 2 || !is_numeric($p[0]) || !is_numeric($p[1])) {
+                continue;
+            }
             $routers[] = [
-                'id'          => (int)$r['id'],
+                'id'          => (int) $r['id'],
                 'name'        => $r['name'],
                 'ip_address'  => $r['ip_address'],
                 'description' => str_replace(["\r", "\n"], ' ', $r['description'] ?: ''),
-                'coverage'    => (int)($r['coverage'] ?: 350),
-                'lat'         => (float)$p[0],
-                'lng'         => (float)$p[1]
+                'coverage'    => (int) ($r['coverage'] ?: 350),
+                'lat'         => (float) $p[0],
+                'lng'         => (float) $p[1]
             ];
         }
 
         $assets = [];
         try {
             foreach (ORM::for_table('tbl_assets')->find_array() as $a) {
-                if (empty($a['coordinates'])) continue;
-                $p = array_map('trim', explode(',', $a['coordinates']));
-                if (count($p) < 2 || !is_numeric($p[0]) || !is_numeric($p[1])) continue;
+                if (empty($a['coordinates'])) {
+                    continue;
+                }
+                $p = array_map('trim', explode(',', (string) $a['coordinates']));
+                if (count($p) < 2 || !is_numeric($p[0]) || !is_numeric($p[1])) {
+                    continue;
+                }
                 $assets[] = [
-                    'id'        => (int)$a['id'],
+                    'id'        => (int) $a['id'],
                     'name'      => $a['name'],
                     'category'  => $a['category'],
                     'condition' => $a['condition_status'],
-                    'lat'       => (float)$p[0],
-                    'lng'       => (float)$p[1]
+                    'lat'       => (float) $p[0],
+                    'lng'       => (float) $p[1]
                 ];
             }
-        } catch (Throwable $e) {}
+        } catch (Throwable $e) {
+        }
 
         api_out(true, 'Data peta berhasil dimuat', [
             'customers' => $customers,
@@ -129,14 +140,18 @@ switch ($action) {
         ]);
         break;
 
+    // =========================================================================
+    // 2. MANAJEMEN KUPON PROMO (tbl_coupons)
+    // =========================================================================
     case 'coupons':
     case 'admin_coupons':
         require_admin_session($api_secret, ['SuperAdmin', 'Admin', 'Sales']);
         ensure_custom_tables();
-        $search = trim(_req('search'));
-        $status_filter = trim(_req('status'));
 
-        $q = ORM::for_table('tbl_coupons')->order_by_desc('id');
+        $search        = trim((string) _req('search'));
+        $status_filter = trim((string) _req('status'));
+        $q             = ORM::for_table('tbl_coupons')->order_by_desc('id');
+
         if ($status_filter !== '' && strtolower($status_filter) !== 'all') {
             $q->where('status', strtolower($status_filter));
         }
@@ -157,36 +172,40 @@ switch ($action) {
                 $r['expired_date'] = $r['end_date'];
             }
             if (empty($r['start_date'])) {
-                $r['start_date'] = !empty($r['created_at']) ? substr($r['created_at'], 0, 10) : date('Y-m-d');
+                $r['start_date'] = !empty($r['created_at']) ? substr((string) $r['created_at'], 0, 10) : date('Y-m-d');
             }
         }
         unset($r);
+
         api_out(true, 'Daftar kupon promo dimuat', $rows);
         break;
 
     case 'admin_coupon_save':
-        require_admin_session($api_secret, ['SuperAdmin', 'Admin', 'Sales']);
+        $admin = require_admin_session($api_secret, ['SuperAdmin', 'Admin', 'Sales']);
+        if (strtolower((string) ($_app_stage ?? '')) === 'demo') {
+            api_out(false, 'You cannot perform this action in Demo mode', null, 403);
+        }
         ensure_custom_tables();
 
-        $id   = (int)_post('id');
-        $raw_code = _post('code', '');
-        $code = class_exists('Text') && method_exists('Text', 'alphanumeric')
+        $id       = (int) _post('id');
+        $raw_code = (string) _post('code', '');
+        $code     = (class_exists('Text') && method_exists('Text', 'alphanumeric'))
             ? strtoupper(Text::alphanumeric($raw_code))
             : strtoupper(preg_replace('/[^A-Za-z0-9]/', '', $raw_code));
-        $type = (_post('type') === 'percent') ? 'percent' : 'fixed';
-        $value = (float)_post('value', 0);
-        $description = trim(_post('description', 'Promo Diskon Layanan'));
-        $max_usage = max(0, (int)_post('max_usage', 0));
-        $min_order_amount = max(0.0, (float)_post('min_order_amount', 0));
-        $max_discount_amount = max(0, (int)_post('max_discount_amount', 0));
-        $status = (_post('status') === 'inactive') ? 'inactive' : 'active';
 
-        $raw_start = trim(_post('start_date') ?: date('Y-m-d'));
-        $raw_end   = trim(_post('end_date') ?: _post('expired_date') ?: date('Y-m-d', strtotime('+30 days')));
-        $start_ts  = strtotime($raw_start);
-        $end_ts    = strtotime($raw_end);
+        $type                = (_post('type') === 'percent') ? 'percent' : 'fixed';
+        $value               = (float) _post('value', 0);
+        $description         = trim((string) _post('description', 'Promo Diskon Layanan'));
+        $max_usage           = max(0, (int) _post('max_usage', 0));
+        $min_order_amount    = max(0.0, (float) _post('min_order_amount', 0));
+        $max_discount_amount = max(0, (int) _post('max_discount_amount', 0));
+        $status              = (_post('status') === 'inactive') ? 'inactive' : 'active';
+        $raw_start           = trim((string) (_post('start_date') ?: date('Y-m-d')));
+        $raw_end             = trim((string) (_post('end_date') ?: _post('expired_date') ?: date('Y-m-d', strtotime('+30 days'))));
+        $start_ts            = strtotime($raw_start);
+        $end_ts              = strtotime($raw_end);
 
-        if (empty($code)) {
+        if ($code === '') {
             api_out(false, class_exists('Lang') ? Lang::T('Coupon Code is required') : 'Kode kupon wajib diisi.', null, 400);
         }
         if ($value <= 0) {
@@ -201,7 +220,7 @@ switch ($action) {
             if (!$coupon) {
                 api_out(false, class_exists('Lang') ? Lang::T('Coupon Not Found') : 'Kupon tidak ditemukan.', null, 404);
             }
-            if (strtoupper($coupon['code']) !== $code) {
+            if (strtoupper((string) $coupon['code']) !== $code) {
                 $dup = ORM::for_table('tbl_coupons')->where('code', $code)->find_one();
                 if ($dup) {
                     api_out(false, class_exists('Lang') ? Lang::T('Coupon Code already exists') : 'Kode kupon sudah digunakan.', null, 400);
@@ -212,7 +231,7 @@ switch ($action) {
             if ($dup) {
                 api_out(false, class_exists('Lang') ? Lang::T('Coupon Code already exists') : 'Kode kupon sudah terdaftar.', null, 400);
             }
-            $coupon = ORM::for_table('tbl_coupons')->create();
+            $coupon              = ORM::for_table('tbl_coupons')->create();
             $coupon->usage_count = 0;
             $coupon->created_at  = date('Y-m-d H:i:s');
         }
@@ -223,7 +242,7 @@ switch ($action) {
         $coupon->description         = $description !== '' ? $description : "Diskon Kupon $code";
         $coupon->max_usage           = $max_usage;
         $coupon->min_order_amount    = $min_order_amount;
-        $coupon->max_discount_amount = $max_discount_amount > 0 ? $max_discount_amount : (int)$value;
+        $coupon->max_discount_amount = $max_discount_amount > 0 ? $max_discount_amount : (int) $value;
         $coupon->status              = $status;
         $coupon->start_date          = date('Y-m-d', $start_ts);
         $coupon->end_date            = date('Y-m-d', $end_ts);
@@ -233,6 +252,7 @@ switch ($action) {
         }
         $coupon->save();
 
+        write_admin_log($admin, ($id > 0 ? 'Mengubah' : 'Menambah') . ' Kupon Promo: ' . $code);
         api_out(
             true,
             class_exists('Lang')
@@ -243,11 +263,14 @@ switch ($action) {
         break;
 
     case 'admin_coupon_status':
-        require_admin_session($api_secret, ['SuperAdmin', 'Admin', 'Sales']);
+        $admin = require_admin_session($api_secret, ['SuperAdmin', 'Admin', 'Sales']);
+        if (strtolower((string) ($_app_stage ?? '')) === 'demo') {
+            api_out(false, 'You cannot perform this action in Demo mode', null, 403);
+        }
         ensure_custom_tables();
-        $id     = (int)(_req('id') ?: _req('coupon_id'));
-        $status = (_req('status') === 'inactive') ? 'inactive' : 'active';
 
+        $id     = (int) (_req('id') ?: _req('coupon_id'));
+        $status = (_req('status') === 'inactive') ? 'inactive' : 'active';
         $coupon = ORM::for_table('tbl_coupons')->find_one($id);
         if (!$coupon) {
             api_out(false, class_exists('Lang') ? Lang::T('Coupon not found.') : 'Kupon tidak ditemukan.', null, 404);
@@ -255,13 +278,19 @@ switch ($action) {
         $coupon->status     = $status;
         $coupon->updated_at = date('Y-m-d H:i:s');
         $coupon->save();
+
+        write_admin_log($admin, 'Mengubah status kupon ' . $coupon['code'] . ' menjadi ' . $status);
         api_out(true, class_exists('Lang') ? Lang::T('Coupon status updated successfully.') : 'Status kupon berhasil diperbarui.', $coupon->as_array());
         break;
 
     case 'admin_coupon_delete':
-        require_admin_session($api_secret, ['SuperAdmin', 'Admin', 'Sales']);
+        $admin = require_admin_session($api_secret, ['SuperAdmin', 'Admin', 'Sales']);
+        if (strtolower((string) ($_app_stage ?? '')) === 'demo') {
+            api_out(false, 'You cannot perform this action in Demo mode', null, 403);
+        }
         ensure_custom_tables();
-        $id = (int)_req('id');
+
+        $id      = (int) _req('id');
         $ids_arr = $_POST['coupon_ids'] ?? ($_POST['couponIds'] ?? null);
         if (is_string($ids_arr)) {
             $ids_arr = json_decode($ids_arr, true);
@@ -269,75 +298,107 @@ switch ($action) {
         if (is_array($ids_arr) && !empty($ids_arr)) {
             $clean_ids = array_map('intval', $ids_arr);
             ORM::for_table('tbl_coupons')->where_in('id', $clean_ids)->delete_many();
+            write_admin_log($admin, 'Menghapus ' . count($clean_ids) . ' kupon promo');
             api_out(true, class_exists('Lang') ? Lang::T('Coupons Deleted Successfully.') : (count($clean_ids) . ' Kupon berhasil dihapus.'));
         }
         $c = ORM::for_table('tbl_coupons')->find_one($id);
-        if ($c) $c->delete();
+        if ($c) {
+            $c_code = $c['code'];
+            $c->delete();
+            write_admin_log($admin, 'Menghapus kupon promo: ' . $c_code);
+        }
         api_out(true, class_exists('Lang') ? Lang::T('Coupons Deleted Successfully.') : 'Kupon berhasil dihapus.');
         break;
 
+    // =========================================================================
+    // 3. MANAJEMEN ASET JARINGAN / INVENTARIS (tbl_assets)
+    // =========================================================================
     case 'assets':
     case 'admin_assets':
         require_admin_session($api_secret);
         ensure_custom_tables();
         $assets = ORM::for_table('tbl_assets')->order_by_desc('id')->find_array();
-        $val = ORM::for_table('tbl_assets')->sum('cost') ?: 0;
+        $val    = ORM::for_table('tbl_assets')->sum('cost') ?: 0;
         api_out(true, 'Daftar aset dimuat', [
-            'summary' => ['total_items' => count($assets), 'total_value' => (float)$val],
+            'summary' => ['total_items' => count($assets), 'total_value' => (float) $val],
             'assets'  => $assets
         ]);
         break;
 
     case 'asset_save':
     case 'admin_asset_save':
-        require_admin_session($api_secret);
+        $admin = require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
+        if (strtolower((string) ($_app_stage ?? '')) === 'demo') {
+            api_out(false, 'You cannot perform this action in Demo mode', null, 403);
+        }
         ensure_custom_tables();
-        $id   = (int)_post('id');
-        $name = trim(_post('name'));
-        if (empty($name)) api_out(false, 'Nama aset wajib diisi.', null, 400);
+
+        $id   = (int) _post('id');
+        $name = trim((string) _post('name'));
+        if ($name === '') {
+            api_out(false, 'Nama aset wajib diisi.', null, 400);
+        }
+
         $a = ($id > 0) ? ORM::for_table('tbl_assets')->find_one($id) : ORM::for_table('tbl_assets')->create();
-        if (!$a) api_out(false, 'Data aset tidak ditemukan.', null, 404);
+        if (!$a) {
+            api_out(false, 'Data aset tidak ditemukan.', null, 404);
+        }
+
         $a->name             = $name;
-        $a->category         = trim(_post('category') ?: 'ODP/ODC');
-        $a->brand            = trim(_post('brand') ?: ($a['brand'] ?? ''));
-        $a->serial_number    = trim(_post('serial_number'));
-        $a->cost             = (float)(_post('cost') ?: 0);
-        $a->location         = trim(_post('location') ?: ($a['location'] ?? ''));
-        $a->coordinates      = trim(_post('coordinates'));
-        $a->condition_status = _post('condition_status') ?: 'Good';
-        $a->notes            = trim(_post('notes') ?: ($a['notes'] ?? ''));
-        if ($id === 0) $a->purchase_date = date('Y-m-d');
+        $a->category         = trim((string) (_post('category') ?: 'ODP/ODC'));
+        $a->brand            = trim((string) (_post('brand') ?: ($a['brand'] ?? '')));
+        $a->serial_number    = trim((string) _post('serial_number'));
+        $a->cost             = (float) (_post('cost') ?: 0);
+        $a->location         = trim((string) (_post('location') ?: ($a['location'] ?? '')));
+        $a->coordinates      = trim((string) _post('coordinates'));
+        $a->condition_status = trim((string) (_post('condition_status') ?: 'Good'));
+        $a->notes            = trim((string) (_post('notes') ?: ($a['notes'] ?? '')));
+        if ($id === 0) {
+            $a->purchase_date = trim((string) (_post('purchase_date') ?: date('Y-m-d')));
+        }
         $a->save();
+
+        write_admin_log($admin, ($id > 0 ? 'Mengubah' : 'Menambah') . ' Aset Jaringan: ' . $name);
         api_out(true, 'Aset ' . $name . ' berhasil disimpan.', $a->as_array());
         break;
 
     case 'asset_delete':
     case 'admin_asset_delete':
-        require_admin_session($api_secret);
+        $admin = require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
+        if (strtolower((string) ($_app_stage ?? '')) === 'demo') {
+            api_out(false, 'You cannot perform this action in Demo mode', null, 403);
+        }
         ensure_custom_tables();
-        $a = ORM::for_table('tbl_assets')->find_one((int)_req('id'));
-        if ($a) $a->delete();
+
+        $a = ORM::for_table('tbl_assets')->find_one((int) _req('id'));
+        if ($a) {
+            $a_name = $a['name'];
+            $a->delete();
+            write_admin_log($admin, 'Menghapus Aset Jaringan: ' . $a_name);
+        }
         api_out(true, 'Aset berhasil dihapus.');
         break;
 
+    // =========================================================================
+    // 4. AUDIT & PELUNASAN MANUAL PAYMENT GATEWAY (tbl_payment_gateway)
+    // =========================================================================
     case 'pg_action':
     case 'admin_payment_gateways':
     case 'admin_pg_action':
-        $pg_dir = !empty($PAYMENTGATEWAY_PATH) ? $PAYMENTGATEWAY_PATH : 'system/paymentgateway';
+        $pg_dir       = !empty($PAYMENTGATEWAY_PATH) ? $PAYMENTGATEWAY_PATH : 'system/paymentgateway';
         $valid_pg_map = get_valid_payment_gateway_names($pg_dir, $config);
-
-        $admin = require_admin_session($api_secret);
-        $sub = trim(_req('sub_action') ?: ($action === 'admin_payment_gateways' ? 'list' : 'check'));
+        $admin        = require_admin_session($api_secret);
+        $sub          = trim((string) (_req('sub_action') ?: ($action === 'admin_payment_gateways' ? 'list' : 'check')));
 
         if ($sub === 'list') {
             $status    = _req('status');
-            $gw_filter = strtolower(trim((string)_req('gateway')));
-            $search    = trim(_req('search'));
-            $limit     = max(20, min(150, (int)(_req('limit') ?: 80)));
+            $gw_filter = strtolower(trim((string) _req('gateway')));
+            $search    = trim((string) _req('search'));
+            $limit     = max(20, min(150, (int) (_req('limit') ?: 80)));
 
             $q = ORM::for_table('tbl_payment_gateway');
-            if ($status !== '' && $status !== null && strtolower((string)$status) !== 'all') {
-                $q->where('status', (int)$status);
+            if ($status !== '' && $status !== null && strtolower((string) $status) !== 'all') {
+                $q->where('status', (int) $status);
             }
             if ($gw_filter !== '' && $gw_filter !== 'all') {
                 $q->where_raw('LOWER(gateway) = ?', [$gw_filter]);
@@ -350,21 +411,22 @@ switch ($action) {
                 );
             }
 
-            $rows = $q->order_by_desc('id')->limit($limit)->find_many();
-            $items = [];
-            $gw_stats = [];
-            $total_paid = 0.0;
+            $rows         = $q->order_by_desc('id')->limit($limit)->find_many();
+            $items        = [];
+            $gw_stats     = [];
+            $total_paid   = 0.0;
             $total_unpaid = 0;
 
             foreach ($rows as $r) {
-                $raw_gw_lower = strtolower(trim((string)($r['gateway'] ?? '')));
-                // Abaikan baris yang kolom gateway-nya berisi nama orang/pelanggan atau bukan Payment Gateway sah
+                $raw_gw_lower = strtolower(trim((string) ($r['gateway'] ?? '')));
+                // Abaikan baris yang kolom gateway-nya bukan modul Payment Gateway sah
                 if ($raw_gw_lower === '' || !isset($valid_pg_map[$raw_gw_lower])) {
                     continue;
                 }
-
                 $parsed = parse_qris_trx($r, $config);
-                if (!$parsed) continue;
+                if (!$parsed) {
+                    continue;
+                }
                 $items[] = $parsed;
 
                 $g_key = strtoupper($raw_gw_lower);
@@ -376,26 +438,25 @@ switch ($action) {
                         'unpaid_count' => 0
                     ];
                 }
-                if ((int)$parsed['status'] === 2) {
+                if ((int) $parsed['status'] === 2) {
                     $gw_stats[$g_key]['paid_count']++;
-                    $gw_stats[$g_key]['paid_total'] += (float)$parsed['price'];
-                    $total_paid += (float)$parsed['price'];
-                } elseif ((int)$parsed['status'] === 1) {
+                    $gw_stats[$g_key]['paid_total'] += (float) $parsed['price'];
+                    $total_paid                     += (float) $parsed['price'];
+                } elseif ((int) $parsed['status'] === 1) {
                     $gw_stats[$g_key]['unpaid_count']++;
                     $total_unpaid++;
                 }
             }
 
-            $active_gws = get_active_gateways($config);
+            $active_gws        = get_active_gateways($config);
             $raw_gw_candidates = array_unique(array_merge(
                 ['viaqris', 'tripay', 'duitku', 'xendit', 'paypal'],
                 array_map('strtolower', array_column($active_gws, 'id')),
                 array_map('strtolower', array_keys($gw_stats))
             ));
-
             $gw_list = [];
             foreach ($raw_gw_candidates as $cand) {
-                $c_clean = strtolower(trim((string)$cand));
+                $c_clean = strtolower(trim((string) $cand));
                 if ($c_clean !== '' && isset($valid_pg_map[$c_clean])) {
                     $gw_list[] = $c_clean;
                 }
@@ -413,33 +474,44 @@ switch ($action) {
             ]);
         }
 
-        $trx_id = (int)_req('id');
+        if (strtolower((string) ($_app_stage ?? '')) === 'demo') {
+            api_out(false, 'You cannot perform this action in Demo mode', null, 403);
+        }
 
+        $trx_id    = (int) _req('id');
         $lock_file = sys_get_temp_dir() . '/phpnuxbill_paylock_' . $trx_id . '.lock';
-        $lock_fp = @fopen($lock_file, 'c+');
+        $lock_fp   = @fopen($lock_file, 'c+');
         if ($lock_fp) {
             @flock($lock_fp, LOCK_EX);
             $GLOBALS['API_LOCK_HANDLE'] = $lock_fp;
         }
 
         $trx = ORM::for_table('tbl_payment_gateway')->find_one($trx_id);
-        if (!$trx) api_out(false, 'Data tagihan tidak ditemukan.', null, 404);
+        if (!$trx) {
+            api_out(false, 'Data tagihan tidak ditemukan.', null, 404);
+        }
         $cust = ORM::for_table('tbl_customers')->where('username', $trx['username'])->find_one();
 
         if ($sub === 'cancel') {
-            if (verify_already_recharged($trx)) api_out(false, 'Tagihan sudah LUNAS.', null, 400);
+            if (verify_already_recharged($trx)) {
+                api_out(false, 'Tagihan sudah LUNAS.', null, 400);
+            }
             $trx->pg_paid_response = '{}';
             $trx->status           = 4;
             $trx->paid_date        = date('Y-m-d H:i:s');
             $trx->save();
+            write_admin_log($admin, '[' . $admin['username'] . ']: Membatalkan tagihan PG #' . $trx['id'] . ' (' . $trx['username'] . ')');
             api_out(true, 'Tagihan berhasil dibatalkan.', parse_qris_trx($trx, $config));
         }
 
         if ($sub === 'approve_manual') {
+            if (!in_array($admin['user_type'], ['SuperAdmin', 'Admin'], true)) {
+                api_out(false, 'Hanya SuperAdmin atau Admin yang dapat menyetujui pembayaran manual.', null, 403);
+            }
             if (verify_already_recharged($trx)) {
                 api_out(true, 'Tagihan sudah LUNAS sebelumnya.', parse_qris_trx($trx, $config));
             }
-            $cur_notif = strtolower(trim((string)($config['user_notification_payment'] ?? '')));
+            $cur_notif = strtolower(trim((string) ($config['user_notification_payment'] ?? '')));
             if ($cur_notif === '' || $cur_notif === 'none') {
                 if (!empty($config['wa_url'])) {
                     $config['user_notification_payment'] = 'wa';
@@ -449,10 +521,16 @@ switch ($action) {
                     $_c['user_notification_payment']     = 'sms';
                 }
             }
+
             if ($cust && class_exists('Package') && Package::rechargeUser($cust['id'], $trx['routers'], $trx['plan_id'], $trx['gateway'], 'Manual Approve (' . $admin['username'] . ')')) {
+                $latest_in = ORM::for_table('tbl_transactions')->where('username', $cust['username'])->order_by_desc('id')->find_one();
+                if ($latest_in && !empty($latest_in['invoice']) && empty($trx['trx_invoice'])) {
+                    $trx->trx_invoice = $latest_in['invoice'];
+                }
                 $trx->status    = 2;
                 $trx->paid_date = date('Y-m-d H:i:s');
                 $trx->save();
+
                 write_admin_log($admin, '[' . $admin['username'] . ']: Manual Approve PG #' . $trx['id'] . ' (' . $trx['gateway'] . ') untuk ' . $cust['username']);
                 unset($_SESSION['notify'], $_SESSION['ntype']);
                 api_out(true, 'Tagihan berhasil dilunasi & paket/saldo aktif!', parse_qris_trx($trx, $config));
@@ -460,17 +538,19 @@ switch ($action) {
             api_out(false, 'Gagal mengaktifkan paket ke Router.', null, 500);
         }
 
+        // Default sub_action: check status langsung ke plugin Payment Gateway terkait
         check_and_expire_trx($trx);
-        $gw_lower = strtolower(trim((string)($trx['gateway'] ?? '')));
+        $gw_lower          = strtolower(trim((string) ($trx['gateway'] ?? '')));
         $can_query_gateway = ($gw_lower === 'viaqris') || !empty($trx['gateway_trx_id']);
-
-        if (!verify_already_recharged($trx) && (int)$trx['status'] === 1 && !empty($trx['gateway']) && $cust && $can_query_gateway) {
+        if (!verify_already_recharged($trx) && (int) $trx['status'] === 1 && !empty($trx['gateway']) && $cust && $can_query_gateway) {
             $gw_file = rtrim($pg_dir, '/\\') . DIRECTORY_SEPARATOR . $trx['gateway'] . '.php';
             if (file_exists($gw_file)) {
                 include_once $gw_file;
                 $status_fn = $trx['gateway'] . '_get_status';
                 if (function_exists($status_fn)) {
-                    if (session_status() !== PHP_SESSION_ACTIVE) @session_start();
+                    if (session_status() !== PHP_SESSION_ACTIVE) {
+                        @session_start();
+                    }
                     $GLOBALS['API_INTERCEPT_MODE']   = 'check_payment';
                     $GLOBALS['API_INTERCEPT_TRX_ID'] = $trx['id'];
                     if (function_exists($trx['gateway'] . '_validate_config')) {
@@ -478,10 +558,11 @@ switch ($action) {
                     }
                     @$status_fn($trx, $cust);
                     $GLOBALS['API_INTERCEPT_TRX_ID'] = null;
-                    $trx = ORM::for_table('tbl_payment_gateway')->find_one($trx_id);
+                    $trx                             = ORM::for_table('tbl_payment_gateway')->find_one($trx_id);
                 }
             }
         }
+
         $is_paid = verify_already_recharged($trx);
         api_out(true, $is_paid ? 'Pembayaran LUNAS!' : 'Pembayaran belum diterima.', [
             'paid' => $is_paid,
