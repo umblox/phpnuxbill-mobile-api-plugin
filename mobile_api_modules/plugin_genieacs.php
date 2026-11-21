@@ -4,7 +4,8 @@
  * PHPNuxBill Mobile API Plugin - GenieACS TR-069 Pro Module (Admin & Customer)
  * Path: system/plugin/mobile_api_modules/plugin_genieacs.php
  * Supports HTTP/HTTPS, Multi-Host, Optical ONT & Standard Wireless Routers (HTB/Ethernet),
- * Auto Bot/Scanner Junk Cleanup, WAN/WLAN TR-098 & TR-181, Connected Hosts, Tags, and Customer Portal.
+ * Auto Bot/Scanner Junk Cleanup, WAN/WLAN TR-098 & TR-181, Filtered Connected Hosts,
+ * Tags, and Hardened Customer Portal (Anti-IDOR & Sanitized Payload).
  **/
 
 global $config, $_c, $admin, $user, $ui, $_app_stage, $api_secret;
@@ -607,11 +608,110 @@ if (!function_exists('genieacs_extract_wan_connections')) {
     }
 }
 
-if (!function_exists('genieacs_extract_connected_hosts')) {
-    function genieacs_extract_connected_hosts($device)
+if (!function_exists('genieacs_is_valid_client_mac')) {
+    /**
+     * Memastikan MAC address adalah perangkat klien asli:
+     * menolak 00:00:00:xx:xx:xx, FF:FF:FF:FF:FF:FF, format rusak, dan alamat multicast.
+     */
+    function genieacs_is_valid_client_mac($mac)
     {
-        $hostsList = [];
-        $seenMacs  = [];
+        $m = strtoupper(trim((string) $mac));
+        if (!preg_match('/^([0-9A-F]{2}:){5}[0-9A-F]{2}$/', $m)) {
+            return false;
+        }
+        if (strpos($m, '00:00:00:') === 0 || $m === 'FF:FF:FF:FF:FF:FF') {
+            return false;
+        }
+        // Bit terendah oktet pertama = 1 menandakan alamat multicast/broadcast (bukan perangkat klien)
+        $firstOctet = hexdec(substr($m, 0, 2));
+        if (($firstOctet & 1) === 1) {
+            return false;
+        }
+        return true;
+    }
+}
+
+if (!function_exists('genieacs_is_valid_lan_ip')) {
+    function genieacs_is_valid_lan_ip($ip)
+    {
+        $ip = trim((string) $ip);
+        if ($ip === '' || !filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+            return false;
+        }
+        if ($ip === '0.0.0.0' || $ip === '127.0.0.1' || $ip === '255.255.255.255' || strpos($ip, '169.254.') === 0) {
+            return false;
+        }
+        return true;
+    }
+}
+
+if (!function_exists('genieacs_extract_connected_hosts')) {
+    function genieacs_extract_connected_hosts($device, $onlyActive = false)
+    {
+        $byMac      = [];
+        $fallback   = [];
+        $addOrMerge = function ($idx, $name, $ip, $mac, $iface, $isActive, $signal) use (&$byMac, &$fallback, $onlyActive) {
+            $mac      = strtoupper(trim((string) $mac));
+            $ip       = trim((string) $ip);
+            $name     = trim((string) $name);
+            $signal   = trim((string) $signal);
+            $validMac = genieacs_is_valid_client_mac($mac);
+            $validIp  = genieacs_is_valid_lan_ip($ip);
+
+            // Buang entri dummy seperti 00:00:00:xx:xx:xx atau slot kosong tanpa MAC/IP valid
+            if ($mac !== '' && !$validMac) {
+                return;
+            }
+            if (!$validMac && !$validIp) {
+                return;
+            }
+            if ($onlyActive && !$isActive) {
+                return;
+            }
+            if ($onlyActive && !$validMac) {
+                return;
+            }
+
+            $cleanName = ($name !== '' && $name !== '*' && strtolower($name) !== 'unknown' && strtolower($name) !== 'null')
+                ? $name
+                : '';
+
+            if ($validMac && isset($byMac[$mac])) {
+                // Gabungkan informasi terbaik (mis. hostname dari DHCP Host + sinyal RSSI dari AssociatedDevice)
+                if ($byMac[$mac]['hostname_raw'] === '' && $cleanName !== '') {
+                    $byMac[$mac]['hostname_raw'] = $cleanName;
+                    $byMac[$mac]['hostname']     = $cleanName;
+                }
+                if ($byMac[$mac]['ip_address'] === '-' && $validIp) {
+                    $byMac[$mac]['ip_address'] = $ip;
+                }
+                if ($byMac[$mac]['signal'] === '' && $signal !== '') {
+                    $byMac[$mac]['signal'] = $signal;
+                }
+                if ($isActive) {
+                    $byMac[$mac]['active'] = true;
+                }
+                return;
+            }
+
+            $suffix   = substr(str_replace([':', '.'], '', $validMac ? $mac : $ip), -4);
+            $dispName = $cleanName !== '' ? $cleanName : ('Perangkat-' . strtoupper($suffix));
+            $entry    = [
+                'index'          => (int) $idx,
+                'hostname_raw'   => $cleanName,
+                'hostname'       => $dispName,
+                'ip_address'     => $validIp ? $ip : '-',
+                'mac_address'    => $validMac ? $mac : '-',
+                'interface_type' => $iface,
+                'active'         => (bool) $isActive,
+                'signal'         => $signal
+            ];
+            if ($validMac) {
+                $byMac[$mac] = $entry;
+            } else {
+                $fallback[] = $entry;
+            }
+        };
 
         // 1. TR-098 LANDevice.1.Hosts.Host
         $tr098Hosts = $device['InternetGatewayDevice']['LANDevice']['1']['Hosts']['Host'] ?? [];
@@ -620,31 +720,21 @@ if (!function_exists('genieacs_extract_connected_hosts')) {
                 if (!is_array($h) || strpos((string) $idx, '_') === 0) {
                     continue;
                 }
-                $ip   = (string) ($h['IPAddress']['_value'] ?? '');
-                $mac  = strtoupper((string) ($h['MACAddress']['_value'] ?? ''));
-                $name = trim((string) ($h['HostName']['_value'] ?? ''));
-                if ($ip === '' && $mac === '') {
-                    continue;
-                }
-                if ($mac !== '') {
-                    $seenMacs[$mac] = true;
-                }
-                $actVal      = $h['Active']['_value'] ?? true;
-                $isActive    = ($actVal === true || $actVal === 1 || $actVal === '1' || $actVal === 'true');
-                $ifType      = (string) ($h['InterfaceType']['_value'] ?? 'WiFi/LAN');
-                $hostsList[] = [
-                    'index'          => (int) $idx,
-                    'hostname'       => $name !== '' ? $name : 'Perangkat-' . substr(str_replace(':', '', $mac ?: $ip), -4),
-                    'ip_address'     => $ip ?: '-',
-                    'mac_address'    => $mac ?: '-',
-                    'interface_type' => $ifType,
-                    'active'         => $isActive,
-                    'signal'         => (string) ($h['X_HW_RSSI']['_value'] ?? ($h['SignalStrength']['_value'] ?? ''))
-                ];
+                $ip        = (string) ($h['IPAddress']['_value'] ?? '');
+                $mac       = (string) ($h['MACAddress']['_value'] ?? '');
+                $name      = (string) ($h['HostName']['_value'] ?? '');
+                $actVal    = $h['Active']['_value'] ?? false;
+                $isActive  = ($actVal === true || $actVal === 1 || $actVal === '1' || strtolower((string) $actVal) === 'true');
+                $ifaceType = (string) ($h['InterfaceType']['_value'] ?? 'WiFi');
+                $connLabel = (stripos($ifaceType, '802.11') !== false || stripos($ifaceType, 'wireless') !== false || stripos($ifaceType, 'wifi') !== false)
+                    ? 'WiFi'
+                    : ((stripos($ifaceType, 'ethernet') !== false) ? 'LAN' : 'WiFi/LAN');
+                $sig       = (string) ($h['X_HW_RSSI']['_value'] ?? ($h['SignalStrength']['_value'] ?? ''));
+                $addOrMerge($idx, $name, $ip, $mac, $connLabel, $isActive, $sig);
             }
         }
 
-        // 2. TR-098 WLANConfiguration.i.AssociatedDevice
+        // 2. TR-098 WLANConfiguration.i.AssociatedDevice (Klien WiFi yang benar-benar terhubung saat ini)
         for ($i = 1; $i <= 8; $i++) {
             $assocMap = $device['InternetGatewayDevice']['LANDevice']['1']['WLANConfiguration'][$i]['AssociatedDevice'] ?? [];
             if (!is_array($assocMap)) {
@@ -654,26 +744,10 @@ if (!function_exists('genieacs_extract_connected_hosts')) {
                 if (!is_array($ad) || strpos((string) $idx, '_') === 0) {
                     continue;
                 }
-                $mac = strtoupper((string) ($ad['AssociatedDeviceMACAddress']['_value'] ?? ''));
+                $mac = (string) ($ad['AssociatedDeviceMACAddress']['_value'] ?? '');
                 $ip  = (string) ($ad['AssociatedDeviceIPAddress']['_value'] ?? '');
-                if ($mac !== '' && isset($seenMacs[$mac])) {
-                    continue;
-                }
-                if ($mac === '' && $ip === '') {
-                    continue;
-                }
-                if ($mac !== '') {
-                    $seenMacs[$mac] = true;
-                }
-                $hostsList[] = [
-                    'index'          => (int) $idx,
-                    'hostname'       => 'WiFi-Client-' . substr(str_replace(':', '', $mac ?: $ip), -4),
-                    'ip_address'     => $ip ?: '-',
-                    'mac_address'    => $mac ?: '-',
-                    'interface_type' => "WiFi #{$i}",
-                    'active'         => true,
-                    'signal'         => (string) ($ad['X_HW_RSSI']['_value'] ?? ($ad['SignalStrength']['_value'] ?? ''))
-                ];
+                $sig = (string) ($ad['X_HW_RSSI']['_value'] ?? ($ad['SignalStrength']['_value'] ?? ''));
+                $addOrMerge($idx, '', $ip, $mac, 'WiFi', true, $sig);
             }
         }
 
@@ -684,33 +758,21 @@ if (!function_exists('genieacs_extract_connected_hosts')) {
                 if (!is_array($h) || strpos((string) $idx, '_') === 0) {
                     continue;
                 }
-                $ip   = (string) ($h['IPAddress']['_value'] ?? '');
-                $mac  = strtoupper((string) ($h['PhysAddress']['_value'] ?? ($h['MACAddress']['_value'] ?? '')));
-                $name = trim((string) ($h['HostName']['_value'] ?? ''));
-                if ($mac !== '' && isset($seenMacs[$mac])) {
-                    continue;
-                }
-                if ($ip === '' && $mac === '') {
-                    continue;
-                }
-                if ($mac !== '') {
-                    $seenMacs[$mac] = true;
-                }
-                $actVal      = $h['Active']['_value'] ?? true;
-                $isActive    = ($actVal === true || $actVal === 1 || $actVal === '1' || $actVal === 'true');
-                $hostsList[] = [
-                    'index'          => (int) $idx,
-                    'hostname'       => $name !== '' ? $name : 'Perangkat-' . substr(str_replace(':', '', $mac ?: $ip), -4),
-                    'ip_address'     => $ip ?: '-',
-                    'mac_address'    => $mac ?: '-',
-                    'interface_type' => 'WiFi/LAN',
-                    'active'         => $isActive,
-                    'signal'         => ''
-                ];
+                $ip       = (string) ($h['IPAddress']['_value'] ?? '');
+                $mac      = (string) ($h['PhysAddress']['_value'] ?? ($h['MACAddress']['_value'] ?? ''));
+                $name     = (string) ($h['HostName']['_value'] ?? '');
+                $actVal   = $h['Active']['_value'] ?? false;
+                $isActive = ($actVal === true || $actVal === 1 || $actVal === '1' || strtolower((string) $actVal) === 'true');
+                $addOrMerge($idx, $name, $ip, $mac, 'WiFi/LAN', $isActive, '');
             }
         }
 
-        return $hostsList;
+        $result = array_merge(array_values($byMac), $fallback);
+        foreach ($result as &$row) {
+            unset($row['hostname_raw']);
+        }
+        unset($row);
+        return $result;
     }
 }
 
@@ -859,17 +921,15 @@ if (!function_exists('genieacs_extract_device_info')) {
         } catch (Throwable $e) {
         }
 
-        // Hitung jumlah perangkat terhubung dari WLAN, HostNumberOfEntries, maupun tabel Hosts
+        // Hitung jumlah perangkat terhubung secara akurat dari host aktif ber-MAC valid (tanpa HostNumberOfEntries historis)
         $wlanConnected = 0;
         $wlanCfgs      = genieacs_extract_wlan_configs($d);
         foreach ($wlanCfgs as $wc) {
             $wlanConnected += (int) ($wc['connected_devices'] ?? 0);
         }
-        $lanHostNumEntries = (int) ($d['InternetGatewayDevice']['LANDevice']['1']['Hosts']['HostNumberOfEntries']['_value']
-            ?? $d['Device']['Hosts']['HostNumberOfEntries']['_value']
-            ?? 0);
-        $extractedHostsCount = count(genieacs_extract_connected_hosts($d));
-        $connectedDevices    = max($wlanConnected, $lanHostNumEntries, $extractedHostsCount);
+        $activeHosts      = genieacs_extract_connected_hosts($d, true);
+        $activeHostsCount = count($activeHosts);
+        $connectedDevices = ($activeHostsCount > 0) ? $activeHostsCount : $wlanConnected;
 
         $lastInform   = (string) ($d['_lastInform'] ?? '');
         $lastInformTs = $lastInform !== '' ? (int) strtotime($lastInform) : 0;
@@ -1365,7 +1425,7 @@ switch ($action) {
         $availIndex   = null;
         $wans         = genieacs_extract_wan_connections($dev, $availIndex);
         $wlan         = genieacs_extract_wlan_configs($dev);
-        $lanHosts     = genieacs_extract_connected_hosts($dev);
+        $lanHosts     = genieacs_extract_connected_hosts($dev, false);
         $tasksRes     = $client->getDeviceTasks($deviceId);
         $pendingTasks = (!empty($tasksRes['success']) && is_array($tasksRes['data'])) ? $tasksRes['data'] : [];
 
@@ -1618,7 +1678,7 @@ switch ($action) {
         break;
 
     // =========================================================================
-    // 7. ENDPOINT KHUSUS APK PELANGGAN (MY DEVICE / PORTAL MANDIRI PELANGGAN)
+    // 7. ENDPOINT KHUSUS APK PELANGGAN (ANTI-IDOR & PAYLOAD AMAN TERSANITASI)
     // =========================================================================
     case 'customer_genieacs_dashboard':
     case 'genieacs_customer_dashboard':
@@ -1629,29 +1689,92 @@ switch ($action) {
         if (!$client) {
             api_out(false, 'Server manajemen modem belum dikonfigurasi oleh Admin.', null, 400);
         }
-        $device = genieacs_resolve_customer_device($client, $customer, trim((string) (_req('id') ?: _req('device_id'))));
+
+        // KEAMANAN (Anti-IDOR): Abaikan device_id dari client; resolusi ketat dari sesi pelanggan yang login.
+        $device = genieacs_resolve_customer_device($client, $customer, '');
         if (!$device) {
             api_out(false, 'Perangkat modem/router belum terdeteksi untuk akun Anda.', null, 404);
         }
+
         $deviceInfo     = genieacs_extract_device_info($device);
         $wlanConfigs    = genieacs_extract_wlan_configs($device);
-        $connectedHosts = genieacs_extract_connected_hosts($device);
+        $connectedHosts = genieacs_extract_connected_hosts($device, true); // Hanya perangkat aktif & MAC valid
         $wanConnections = genieacs_extract_wan_connections($device);
 
+        // Deteksi status koneksi internet secara aman tanpa membocorkan IP WAN/VLAN/PPPoE
+        $internetStatus = $deviceInfo['online'] ? 'Connected' : 'Disconnected';
+        foreach ($wanConnections as $wc) {
+            if (!empty($wc['enable']) && strcasecmp((string) ($wc['connection_status'] ?? ''), 'Connected') === 0) {
+                $internetStatus = 'Connected';
+                break;
+            }
+        }
+
+        // Saring hanya field WLAN yang aman (tanpa BSSID/MAC internal router)
+        $safeWlans = [];
+        foreach ($wlanConfigs as $w) {
+            if (trim((string) ($w['ssid'] ?? '')) === '' && empty($w['enable'])) {
+                continue;
+            }
+            $safeWlans[] = [
+                'index'             => (int) ($w['index'] ?? 1),
+                'ssid'              => (string) ($w['ssid'] ?? ''),
+                'password'          => (string) ($w['password'] ?? ''),
+                'enable'            => (bool) ($w['enable'] ?? true),
+                'band'              => (string) ($w['band'] ?? '2.4GHz'),
+                'channel'           => (string) ($w['channel'] ?? 'Auto'),
+                'security'          => (string) ($w['security'] ?? 'WPA2-PSK'),
+                'security_mode'     => (string) ($w['security_mode'] ?? 'WPA2PSK'),
+                'connected_devices' => (int) ($w['connected_devices'] ?? 0),
+                'source'            => (string) ($w['source'] ?? 'tr098')
+            ];
+        }
+
+        $activeCount = count($connectedHosts);
+        if ($activeCount === 0) {
+            foreach ($safeWlans as $sw) {
+                $activeCount += (int) $sw['connected_devices'];
+            }
+        }
+
+        $mfgPart   = trim((string) ($deviceInfo['manufacturer'] ?? ''));
+        $modelPart = trim((string) ($deviceInfo['model'] ?? ''));
+        if ($mfgPart === '-') {
+            $mfgPart = '';
+        }
+        if ($modelPart === '-') {
+            $modelPart = '';
+        }
+        $displayModel = trim($mfgPart . ' ' . $modelPart);
+        if ($mfgPart !== '' && $modelPart !== '' && stripos($modelPart, $mfgPart) !== false) {
+            $displayModel = $modelPart;
+        }
+        if ($displayModel === '') {
+            $displayModel = 'Router Pelanggan';
+        }
+
+        // Payload perangkat aman (TANPA device_id, serial_number, wan_ip, tr069_ip, connection_url, pppoe_username, tags)
+        $safeDevice = [
+            'online'             => (bool) $deviceInfo['online'],
+            'manufacturer'       => $mfgPart,
+            'model'              => $displayModel,
+            'device_type'        => !empty($deviceInfo['is_optical']) ? 'Optical ONT' : 'Wireless Router',
+            'internet_status'    => $internetStatus,
+            'uptime'             => (string) ($deviceInfo['uptime'] ?? '-'),
+            'last_inform'        => (string) ($deviceInfo['last_inform'] ?? '-'),
+            'is_optical'         => (bool) ($deviceInfo['is_optical'] ?? false),
+            'rx_power'           => (string) ($deviceInfo['rx_power'] ?? 'N/A'),
+            'rx_power_status'    => (string) ($deviceInfo['rx_power_status'] ?? 'normal'),
+            'temperature'        => (string) ($deviceInfo['temperature'] ?? ''),
+            'temperature_status' => (string) ($deviceInfo['temp_status'] ?? 'normal'),
+            'connected_devices'  => $activeCount
+        ];
+
         api_out(true, 'Status perangkat berhasil dimuat', [
-            'online'          => (bool) $deviceInfo['online'],
-            'device'          => $deviceInfo,
-            'device_info'     => $deviceInfo,
-            'wlan_configs'    => $wlanConfigs,
-            'connected_hosts' => $connectedHosts,
-            'wan_connections' => $wanConnections,
-            'customer'        => [
-                'id'             => (int) $customer['id'],
-                'username'       => $customer['username'],
-                'fullname'       => $customer['fullname'],
-                'pppoe_username' => $customer['pppoe_username'] ?? '',
-                'pppoe_ip'       => $customer['pppoe_ip'] ?? ''
-            ]
+            'online'          => $safeDevice['online'],
+            'device'          => $safeDevice,
+            'wlan_configs'    => $safeWlans,
+            'connected_hosts' => $connectedHosts
         ]);
         break;
 
@@ -1663,23 +1786,22 @@ switch ($action) {
         $ssid      = trim((string) _post('ssid'));
         $password  = trim((string) _post('password'));
         $security  = trim((string) (_post('security_mode') ?: 'WPA2PSK'));
-        $channel   = trim((string) _post('channel'));
-        $enable    = trim((string) _post('enable'));
         $source    = strtolower(trim((string) (_post('source') ?: 'tr098')));
 
-        if ($ssid === '') {
-            api_out(false, 'Nama WiFi (SSID) tidak boleh kosong.', null, 400);
+        if ($ssid === '' || strlen($ssid) > 32) {
+            api_out(false, 'Nama WiFi (SSID) wajib diisi (maksimal 32 karakter).', null, 400);
         }
-        if ($security !== 'None' && $password !== '' && strlen($password) < 8) {
-            api_out(false, 'Password WiFi minimal 8 karakter.', null, 400);
+        if ($security !== 'None' && $password !== '' && (strlen($password) < 8 || strlen($password) > 63)) {
+            api_out(false, 'Password WiFi harus 8 sampai 63 karakter.', null, 400);
         }
 
         $client = genieacs_load_config();
         if (!$client) {
             api_out(false, 'Server GenieACS tidak tersedia.', null, 400);
         }
-        $reqDeviceId = trim((string) (_post('id') ?: _post('device_id')));
-        $device      = genieacs_resolve_customer_device($client, $customer, $reqDeviceId);
+
+        // KEAMANAN (Anti-IDOR): Abaikan id dari POST; resolusi ketat dari sesi customer
+        $device = genieacs_resolve_customer_device($client, $customer, '');
         if (!$device || empty($device['_id'])) {
             api_out(false, 'Perangkat modem Anda tidak ditemukan.', null, 404);
         }
@@ -1693,11 +1815,10 @@ switch ($action) {
             }
         }
 
-        $params = genieacs_build_wlan_set_params($wlanIndex, $ssid, $password, $security, $source, $channel, $enable);
+        $params = genieacs_build_wlan_set_params($wlanIndex, $ssid, $password, $security, $source);
         $res    = $client->setParameterValues($deviceId, $params, 10000);
         if (!empty($res['success'])) {
-            api_out(true, 'Nama WiFi & Password berhasil diperbarui!', [
-                'device_id'  => $deviceId,
+            api_out(true, 'Nama WiFi & Password berhasil diperbarui! Perangkat Anda akan menyambung ulang.', [
                 'wlan_index' => $wlanIndex,
                 'ssid'       => $ssid
             ]);
@@ -1713,8 +1834,9 @@ switch ($action) {
         if (!$client) {
             api_out(false, 'Server GenieACS tidak tersedia.', null, 400);
         }
-        $reqDeviceId = trim((string) (_req('id') ?: _req('device_id')));
-        $device      = genieacs_resolve_customer_device($client, $customer, $reqDeviceId);
+
+        // KEAMANAN (Anti-IDOR): Resolusi ketat dari sesi customer
+        $device = genieacs_resolve_customer_device($client, $customer, '');
         if (!$device || empty($device['_id'])) {
             api_out(false, 'Perangkat modem Anda tidak ditemukan.', null, 404);
         }
@@ -1733,8 +1855,9 @@ switch ($action) {
         if (!$client) {
             api_out(false, 'Server GenieACS tidak tersedia.', null, 400);
         }
-        $reqDeviceId = trim((string) (_req('id') ?: _req('device_id')));
-        $device      = genieacs_resolve_customer_device($client, $customer, $reqDeviceId);
+
+        // KEAMANAN (Anti-IDOR): Resolusi ketat dari sesi customer
+        $device = genieacs_resolve_customer_device($client, $customer, '');
         if (!$device || empty($device['_id'])) {
             api_out(false, 'Perangkat modem Anda tidak ditemukan.', null, 404);
         }
