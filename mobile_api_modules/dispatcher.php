@@ -253,6 +253,7 @@ try {
         case 'customer_inbox_read':
         case 'customer_inbox_delete':
         case 'customer_transfer_balance':
+        case 'customer_lookup_friend':            
         case 'customer_send_plan':
         case 'customer_sync_plan':
         case 'customer_extend_plan':
