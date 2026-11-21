@@ -4,9 +4,10 @@
  * Path: system/plugin/mobile_api_modules/customer_portal_api.php
  *
  * Fitur: Login, Dashboard (+ Pengumuman, Foto Profil Web, Unread Inbox),
- * Paket Internet & Top-Up, Riwayat, Auto-Renewal, Redeem Voucher,
- * Checkout & Pembayaran Multi-Gateway, Inbox Pelanggan, Transfer Saldo,
- * Belikan Paket Teman, Sync Router, Extend Masa Tenggang, Edit Profil & Foto, Ganti Sandi.
+ * Paket Internet & Top-Up (Nama Bandwidth + Harga Coret), Riwayat, Auto-Renewal,
+ * Redeem Voucher, Checkout & Pembayaran Multi-Gateway, Inbox Pelanggan,
+ * Transfer Saldo, Belikan Paket Teman, Sync Router, Extend Masa Tenggang,
+ * Edit Profil & Foto, Ganti Sandi.
  */
 
 global $config, $_c, $user, $PAYMENTGATEWAY_PATH, $UPLOAD_PATH, $CACHE_PATH, $routes, $_app_stage, $phpnux_root, $api_secret;
@@ -173,6 +174,25 @@ switch ($action) {
         }
         unset($b_item);
 
+        foreach ($recharges as &$r_item) {
+            $p_row = !empty($r_item['plan_id']) ? ORM::for_table('tbl_plans')->find_one((int) $r_item['plan_id']) : null;
+            if (!$p_row && !empty($r_item['namebp'])) {
+                $p_row = ORM::for_table('tbl_plans')->where('name_plan', $r_item['namebp'])->find_one();
+            }
+            if ($p_row) {
+                $cost_r                 = calculate_order_cost($user['id'], $p_row, $config);
+                $r_item['plan_id']      = (int) $p_row['id'];
+                $r_item['price']        = (float) $cost_r['total_cost'];
+                $r_item['validity']     = trim($p_row['validity'] . ' ' . $p_row['validity_unit']);
+                $r_item['plan_enabled'] = (int) $p_row['enabled'];
+            } else {
+                $r_item['price']        = 0.0;
+                $r_item['validity']     = '';
+                $r_item['plan_enabled'] = 0;
+            }
+        }
+        unset($r_item);
+        
         $pg_rows = ORM::for_table('tbl_payment_gateway')
             ->where('username', $user['username'])
             ->order_by_desc('id')
@@ -224,17 +244,17 @@ switch ($action) {
                 'allow_email_otp'        => ($config['allow_email_otp'] ?? 'no') === 'yes'
             ],
             'customer' => [
-                'id'                   => (int) $user['id'],
-                'username'             => $user['username'],
-                'fullname'             => $user['fullname'],
-                'phonenumber'          => $user['phonenumber'],
-                'email'                => $user['email'],
-                'address'              => $user['address'],
-                'balance'              => (float) $user['balance'],
-                'service_type'         => $user['service_type'] ?: 'Others',
-                'auto_renewal'         => (int) ($user['auto_renewal'] ?? 0),
-                'photo_url'            => portal_resolve_customer_photo_url($user),
-                'extended_this_month'  => $extended_month
+                'id'                  => (int) $user['id'],
+                'username'            => $user['username'],
+                'fullname'            => $user['fullname'],
+                'phonenumber'         => $user['phonenumber'],
+                'email'               => $user['email'],
+                'address'             => $user['address'],
+                'balance'             => (float) $user['balance'],
+                'service_type'        => $user['service_type'] ?: 'Others',
+                'auto_renewal'        => (int) ($user['auto_renewal'] ?? 0),
+                'photo_url'           => portal_resolve_customer_photo_url($user),
+                'extended_this_month' => $extended_month
             ],
             'announcement'       => portal_read_announcement(),
             'inbox_unread_count' => $inbox_unread,
@@ -247,7 +267,7 @@ switch ($action) {
         break;
 
     // =========================================================================
-    // 3. DAFTAR PAKET INTERNET & TOP-UP SALDO (OTOMATIS FILTER TIPE LAYANAN)
+    // 3. DAFTAR PAKET INTERNET & TOP-UP SALDO (MENAMPILKAN NAMA BANDWIDTH)
     // =========================================================================
     case 'plans':
         $user      = require_customer_session($api_secret);
@@ -260,7 +280,7 @@ switch ($action) {
         $bw_map = [];
         try {
             foreach (ORM::for_table('tbl_bandwidth')->find_array() as $bw) {
-                $bw_map[(int) $bw['id']] = trim($bw['rate_down'] . ' ' . $bw['rate_down_unit'] . ' / ' . $bw['rate_up'] . ' ' . $bw['rate_up_unit']);
+                $bw_map[(int) $bw['id']] = trim((string) ($bw['name_bw'] ?? ''));
             }
         } catch (Throwable $e) {
         }
@@ -268,21 +288,51 @@ switch ($action) {
         $internet_plans = [];
         $balance_plans  = [];
         foreach ($plans as $p) {
-            $p_type  = strtoupper(trim((string) $p['type']));
-            $prepaid = strtolower(trim((string) ($p['prepaid'] ?? 'yes')));
-            $bwLabel = $bw_map[(int) ($p['id_bw'] ?? 0)] ?? '';
-            $item    = [
-                'id'        => (int) $p['id'],
-                'name_plan' => $p['name_plan'],
-                'price'     => (float) $p['price'],
-                'price_old' => (float) ($p['price_old'] ?? 0),
-                'type'      => ($p_type === 'PPPOE') ? 'PPPoE' : (($p_type === 'HOTSPOT') ? 'Hotspot' : $p['type']),
-                'prepaid'   => $p['prepaid'],
-                'enabled'   => (int) $p['enabled'],
-                'validity'  => $p['validity'] . ' ' . $p['validity_unit'],
-                'bandwidth' => $bwLabel,
-                'routers'   => $p['routers']
+            $p_type    = strtoupper(trim((string) $p['type']));
+            $prepaid   = strtolower(trim((string) ($p['prepaid'] ?? 'yes')));
+            $bwName    = $bw_map[(int) ($p['id_bw'] ?? 0)] ?? '';
+            $price     = (float) $p['price'];
+            $price_old = (float) ($p['price_old'] ?? 0);
+            if ($price_old <= $price) {
+                $price_old = 0.0;
+            }
+
+            $quota_label = 'Unlimited';
+            if (strcasecmp((string) ($p['typebp'] ?? ''), 'Limited') === 0) {
+                $lt = (string) ($p['limit_type'] ?? '');
+                if ($lt === 'Data_Limit' && !empty($p['data_limit'])) {
+                    $quota_label = trim($p['data_limit'] . ' ' . ($p['data_unit'] ?? 'MB'));
+                } elseif ($lt === 'Time_Limit' && !empty($p['time_limit'])) {
+                    $quota_label = trim($p['time_limit'] . ' ' . ($p['time_unit'] ?? 'Hrs'));
+                } elseif ($lt === 'Both_Limit') {
+                    $parts_q = [];
+                    if (!empty($p['data_limit'])) {
+                        $parts_q[] = trim($p['data_limit'] . ' ' . ($p['data_unit'] ?? 'MB'));
+                    }
+                    if (!empty($p['time_limit'])) {
+                        $parts_q[] = trim($p['time_limit'] . ' ' . ($p['time_unit'] ?? 'Hrs'));
+                    }
+                    if (!empty($parts_q)) {
+                        $quota_label = implode(' • ', $parts_q);
+                    }
+                }
+            }
+
+            $item = [
+                'id'           => (int) $p['id'],
+                'name_plan'    => $p['name_plan'],
+                'price'        => $price,
+                'price_old'    => $price_old,
+                'type'         => ($p_type === 'PPPOE') ? 'PPPoE' : (($p_type === 'HOTSPOT') ? 'Hotspot' : $p['type']),
+                'prepaid'      => $p['prepaid'],
+                'enabled'      => (int) $p['enabled'],
+                'validity'     => $p['validity'] . ' ' . $p['validity_unit'],
+                'bandwidth'    => $bwName,
+                'shared_users' => max(1, (int) ($p['shared_users'] ?? 1)),
+                'quota_label'  => $quota_label,
+                'routers'      => ($p['is_radius'] == '1') ? 'Radius' : (string) ($p['routers'] ?? '')
             ];
+
             if ($p_type === 'BALANCE') {
                 if ($prepaid === 'yes') {
                     $balance_plans[] = $item;
@@ -302,6 +352,7 @@ switch ($action) {
                 }
             }
         }
+
         api_out(true, 'Daftar paket dimuat', [
             'customer_service_type' => $user['service_type'] ?: 'Others',
             'internet_plans'        => $internet_plans,
@@ -863,6 +914,119 @@ switch ($action) {
         api_out(true, class_exists('Lang') ? Lang::T('Sending balance success') : 'Transfer saldo berhasil dikirim!');
         break;
 
+    // =========================================================================
+    // 8b. CEK AKUN TEMAN & DAFTAR PAKET YANG COCOK (UNTUK KIRIM PAKET TEMAN)
+    // =========================================================================
+    case 'customer_lookup_friend':
+        $user = require_customer_session($api_secret);
+        if (($config['enable_balance'] ?? 'no') !== 'yes') {
+            api_out(false, class_exists('Lang') ? Lang::T('Balance not enabled') : 'Fitur Saldo tidak diaktifkan.', null, 400);
+        }
+        $target_username = trim((string) (_req('username') ?: _post('username')));
+        if ($target_username === '') {
+            api_out(false, 'Masukkan username teman terlebih dahulu.', null, 400);
+        }
+        $target = ORM::for_table('tbl_customers')->where('username', $target_username)->find_one();
+        if (!$target) {
+            api_out(false, class_exists('Lang') ? Lang::T('Username not found') : 'Username teman tidak ditemukan.', null, 404);
+        }
+        if (strcasecmp($user['username'], $target['username']) === 0) {
+            api_out(false, 'Gunakan menu Paket untuk membeli paket bagi akun Anda sendiri.', null, 400);
+        }
+        if (!empty($target['status']) && $target['status'] !== 'Active') {
+            api_out(false, 'Status akun teman sedang tidak aktif (' . $target['status'] . ').', null, 400);
+        }
+
+        $target_type = strtoupper(trim((string) ($target['service_type'] ?: 'OTHERS')));
+
+        $bw_map = [];
+        try {
+            foreach (ORM::for_table('tbl_bandwidth')->find_array() as $bw) {
+                $bw_map[(int) $bw['id']] = trim((string) ($bw['name_bw'] ?? ''));
+            }
+        } catch (Throwable $e) {
+        }
+
+        $format_friend_plan = function ($p) use ($target, $config, $bw_map) {
+            $p_type    = strtoupper(trim((string) $p['type']));
+            $cost_info = calculate_order_cost($target['id'], $p, $config);
+            $price     = (float) $cost_info['total_cost'];
+            $price_old = (float) ($p['price_old'] ?? 0);
+            if ($price_old <= $price) {
+                $price_old = 0.0;
+            }
+            return [
+                'id'           => (int) $p['id'],
+                'name_plan'    => (string) $p['name_plan'],
+                'price'        => $price,
+                'price_old'    => $price_old,
+                'type'         => ($p_type === 'PPPOE') ? 'PPPoE' : (($p_type === 'HOTSPOT') ? 'Hotspot' : (string) $p['type']),
+                'validity'     => trim($p['validity'] . ' ' . $p['validity_unit']),
+                'bandwidth'    => $bw_map[(int) ($p['id_bw'] ?? 0)] ?? '',
+                'shared_users' => max(1, (int) ($p['shared_users'] ?? 1)),
+                'quota_label'  => 'Unlimited',
+                'routers'      => ($p['is_radius'] == '1') ? 'Radius' : (string) ($p['routers'] ?? '')
+            ];
+        };
+
+        $active_ur = ORM::for_table('tbl_user_recharges')
+            ->where('username', $target['username'])
+            ->where('status', 'on')
+            ->order_by_desc('id')
+            ->find_one();
+
+        $last_ur = $active_ur ?: ORM::for_table('tbl_user_recharges')
+            ->where('username', $target['username'])
+            ->order_by_desc('id')
+            ->find_one();
+
+        $last_plan = null;
+        if ($last_ur && !empty($last_ur['plan_id'])) {
+            $lp = ORM::for_table('tbl_plans')->where('enabled', 1)->find_one((int) $last_ur['plan_id']);
+            if ($lp && strtoupper(trim((string) $lp['type'])) !== 'BALANCE') {
+                $last_plan = $format_friend_plan($lp);
+            }
+        }
+
+        $plans          = ORM::for_table('tbl_plans')->where('enabled', 1)->order_by_asc('price')->find_array();
+        $eligible_plans = [];
+        foreach ($plans as $p) {
+            $p_type  = strtoupper(trim((string) $p['type']));
+            $prepaid = strtolower(trim((string) ($p['prepaid'] ?? 'yes')));
+            if ($p_type === 'BALANCE') {
+                continue;
+            }
+            if ($p_type === 'HOTSPOT' && $prepaid === 'no') {
+                continue;
+            }
+            $matches = false;
+            if ($target_type === 'HOTSPOT' && $p_type === 'HOTSPOT') {
+                $matches = true;
+            } elseif ($target_type === 'PPPOE' && $p_type === 'PPPOE') {
+                $matches = true;
+            } elseif ($target_type !== 'HOTSPOT' && $target_type !== 'PPPOE') {
+                if ($p_type === 'HOTSPOT' || $p_type === 'PPPOE') {
+                    $matches = true;
+                }
+            }
+            if ($matches) {
+                $eligible_plans[] = $format_friend_plan($p);
+            }
+        }
+
+        api_out(true, 'Akun teman ditemukan.', [
+            'username'          => (string) $target['username'],
+            'fullname'          => (string) ($target['fullname'] ?: $target['username']),
+            'service_type'      => (string) ($target['service_type'] ?: 'Others'),
+            'has_active_plan'   => (bool) ($active_ur != null),
+            'active_plan_id'    => $active_ur ? (int) $active_ur['plan_id'] : 0,
+            'active_plan_name'  => $active_ur ? (string) ($active_ur['namebp'] ?? '') : '',
+            'active_expiration' => $active_ur ? trim(($active_ur['expiration'] ?? '') . ' ' . ($active_ur['time'] ?? '')) : '',
+            'last_plan'         => $last_plan,
+            'eligible_plans'    => $eligible_plans
+        ]);
+        break;
+        
     // =========================================================================
     // 9. BELIKAN PAKET UNTUK TEMAN (SESUAI home.php & order.php case 'send')
     // =========================================================================
