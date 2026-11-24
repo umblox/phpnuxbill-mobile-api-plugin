@@ -12,24 +12,19 @@ if (!function_exists('ensure_official_payment_notif_channel')) {
     function ensure_official_payment_notif_channel()
     {
         global $config, $_c;
+        // Hormati penuh pilihan admin di web ('wa', 'sms', 'email', atau 'none').
+        // Fallback hanya jika setting benar-benar belum pernah diisi (kosong).
         $cur = strtolower(trim((string) ($config['user_notification_payment'] ?? '')));
-        if ($cur === '' || $cur === 'none') {
+        if ($cur === '') {
             if (!empty($config['wa_url'])) {
-                $config['user_notification_payment']            = 'wa';
-                $_c['user_notification_payment']                = 'wa';
-                $GLOBALS['config']['user_notification_payment'] = 'wa';
-                $GLOBALS['_c']['user_notification_payment']     = 'wa';
+                $config['user_notification_payment'] = $_c['user_notification_payment'] = 'wa';
             } elseif (!empty($config['sms_url'])) {
-                $config['user_notification_payment']            = 'sms';
-                $_c['user_notification_payment']                = 'sms';
-                $GLOBALS['config']['user_notification_payment'] = 'sms';
-                $GLOBALS['_c']['user_notification_payment']     = 'sms';
+                $config['user_notification_payment'] = $_c['user_notification_payment'] = 'sms';
             } elseif (!empty($config['smtp_host'])) {
-                $config['user_notification_payment']            = 'email';
-                $_c['user_notification_payment']                = 'email';
-                $GLOBALS['config']['user_notification_payment'] = 'email';
-                $GLOBALS['_c']['user_notification_payment']     = 'email';
+                $config['user_notification_payment'] = $_c['user_notification_payment'] = 'email';
             }
+            $GLOBALS['config']['user_notification_payment'] = $config['user_notification_payment'] ?? 'none';
+            $GLOBALS['_c']['user_notification_payment']     = $config['user_notification_payment'] ?? 'none';
         }
     }
 }
@@ -427,6 +422,8 @@ switch ($action) {
         $tur->save();
 
         write_admin_log($admin, "Extend Customer {$tur['username']} for $days days until $expiration");
+        $adm_name = $admin['fullname'] ?: $admin['username'];
+        notify_telegram_admin("#u{$tur['username']} #extend\nPaket: {$tur['namebp']}\nDiperpanjang: +{$days} hari s/d {$expiration}\nOleh: {$adm_name}");
         api_out(true, "Masa aktif {$tur['username']} berhasil diperpanjang $days hari hingga $expiration.", $tur->as_array());
         break;
 
@@ -434,7 +431,7 @@ switch ($action) {
     // 4. TOP-UP SALDO PELANGGAN (DEPOSIT)
     // =========================================================================
     case 'admin_deposit':
-        $admin = require_admin_session($api_secret);
+        $admin = require_admin_session($api_secret, ['SuperAdmin', 'Admin', 'Agent', 'Sales']);
         if (strtolower((string) ($_app_stage ?? '')) === 'demo') {
             api_out(false, 'You cannot perform this action in Demo mode', null, 403);
         }
@@ -467,12 +464,16 @@ switch ($action) {
 
         // Tahan sementara notifikasi bawaan di dalam rechargeBalance agar tidak terkirim ganda,
         // lalu kirimkan secara asinkron pasca-respon lewat queue_post_response_task.
-        $orig_notif_pay                      = $config['user_notification_payment'] ?? 'wa';
-        $orig_tg_bot                         = $config['telegram_bot'] ?? '';
-        $config['user_notification_payment'] = 'none';
-        $_c['user_notification_payment']     = 'none';
-        $config['telegram_bot']              = '';
-        $_c['telegram_bot']                  = '';
+        $orig_notif_pay                                 = $config['user_notification_payment'] ?? 'none';
+        $orig_tg_bot                                    = $config['telegram_bot'] ?? '';
+        $config['user_notification_payment']            = 'none';
+        $_c['user_notification_payment']                = 'none';
+        $GLOBALS['config']['user_notification_payment'] = 'none';
+        $GLOBALS['_c']['user_notification_payment']     = 'none';
+        $config['telegram_bot']                         = '';
+        $_c['telegram_bot']                             = '';
+        $GLOBALS['config']['telegram_bot']              = '';
+        $GLOBALS['_c']['telegram_bot']                  = '';
 
         @ob_start();
         try {
@@ -554,15 +555,32 @@ switch ($action) {
                 . "Note: {$note}";
             notify_telegram_admin($tg_msg, true);
 
-            // 2. Kirim Notifikasi WhatsApp / SMS ke Pelanggan (non-blocking)
+            // 2. Kirim Notifikasi WA / SMS / Email ke Pelanggan (non-blocking, hormati setting web)
             $cust_phone = trim((string) (($c_fresh ? $c_fresh['phonenumber'] : $c['phonenumber']) ?? ''));
+            $cust_email = trim((string) (($c_fresh ? $c_fresh['email'] : $c['email']) ?? ''));
             $wa_text    = trim((string) ($receipt['wa_web_text'] ?? ''));
-            if ($cust_phone !== '' && $wa_text !== '') {
-                $notif_mode = strtolower(trim((string) ($config['user_notification_payment'] ?? 'wa')));
-                if ($notif_mode === 'sms') {
-                    notify_sms_customer($cust_phone, $wa_text, true);
-                } elseif ($notif_mode === 'wa' || !empty($config['wa_url'])) {
+            $notif_mode = strtolower(trim((string) ($config['user_notification_payment'] ?? 'none')));
+
+            if ($wa_text !== '' && $notif_mode !== 'none') {
+                if ($notif_mode === 'wa' && $cust_phone !== '') {
                     notify_whatsapp_customer($cust_phone, $wa_text, true);
+                } elseif ($notif_mode === 'sms' && $cust_phone !== '') {
+                    notify_sms_customer($cust_phone, $wa_text, true);
+                } elseif ($notif_mode === 'email' && $cust_email !== '' && class_exists('Message') && method_exists('Message', 'sendEmail')) {
+                    $email_subject = '[' . ($config['CompanyName'] ?? 'PHPNuxBill') . '] Invoice ' . ($in_arr['invoice'] ?? '');
+                    if (function_exists('queue_post_response_task')) {
+                        queue_post_response_task(function () use ($cust_email, $email_subject, $wa_text) {
+                            try {
+                                @Message::sendEmail($cust_email, $email_subject, $wa_text);
+                            } catch (Throwable $e) {
+                            }
+                        });
+                    } else {
+                        try {
+                            @Message::sendEmail($cust_email, $email_subject, $wa_text);
+                        } catch (Throwable $e) {
+                        }
+                    }
                 }
             }
 
@@ -575,7 +593,7 @@ switch ($action) {
             api_out(false, 'Gagal memproses isi ulang saldo pelanggan.', null, 500);
         }
         break;
-
+        
     // =========================================================================
     // 5. VOUCHER HOTSPOT / PPPOE (LIST, GENERATE, DELETE & REFILL)
     // =========================================================================
