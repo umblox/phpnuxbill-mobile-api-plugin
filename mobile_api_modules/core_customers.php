@@ -238,7 +238,7 @@ switch ($action) {
 
         if ($id === 0) {
             $cust             = ORM::for_table('tbl_customers')->create();
-            $cust->created_by = $admin['id'];
+            $cust->created_by = (int) $admin['id'];
             $cust->created_at = date('Y-m-d H:i:s');
             $cust->balance    = (float) (_post('balance') ?: 0);
         }
