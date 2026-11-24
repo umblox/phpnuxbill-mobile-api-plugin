@@ -1,0 +1,101 @@
+name: Build Codebase Snapshot (Mobile API Plugin)
+
+on:
+  push:
+    branches:
+      - master
+    paths-ignore:
+      - 'README.md'
+      - '.github/workflows/snapshot.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages-snapshot-plugin"
+  cancel-in-progress: true
+
+jobs:
+  build_and_publish_snapshot:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate Plugin PHP snapshot bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p public
+          OUT="public/snapshot_plugin.txt"
+          UPDATED_AT="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+
+          {
+            echo "# PHPNuxBill Mobile API Plugin - Full Codebase Snapshot"
+            echo "# Repository : ${{ github.repository }}"
+            echo "# Branch     : ${{ github.ref_name }}"
+            echo "# Commit     : ${{ github.sha }}"
+            echo "# Updated    : ${UPDATED_AT}"
+            echo ""
+            echo "## FILE TREE"
+            find . -maxdepth 3 -type f \( -name "*.php" -o -name "*.tpl" -o -name "*.json" \) ! -path "./.git/*" | sort
+            echo ""
+
+            if [ -f "mobile_api.php" ]; then
+              printf "\n\n// ==========================================\n// FILE: mobile_api.php\n// ==========================================\n\n"
+              cat "mobile_api.php"
+            fi
+
+            for dir in mobile_api_modules ui; do
+              if [ -d "$dir" ]; then
+                find "$dir" -type f \( -name "*.php" -o -name "*.tpl" \) | sort | while IFS= read -r f; do
+                  printf "\n\n// ==========================================\n// FILE: %s\n// ==========================================\n\n" "$f"
+                  cat "$f"
+                done
+              fi
+            done
+          } > "$OUT"
+
+          cat > public/index.html <<EOF
+          <!DOCTYPE html>
+          <html lang="id">
+          <head>
+            <meta charset="utf-8" />
+            <title>PHPNuxBill Mobile API Plugin Snapshot</title>
+          </head>
+          <body style="font-family:sans-serif;padding:24px;">
+            <h2>PHPNuxBill Mobile API Plugin Snapshot</h2>
+            <p>Commit: <code>${{ github.sha }}</code></p>
+            <p>Updated: ${UPDATED_AT}</p>
+            <p><a href="./snapshot_plugin.txt">Buka snapshot_plugin.txt</a></p>
+          </body>
+          </html>
+          EOF
+
+          ls -lh "$OUT"
+
+      - name: Upload downloadable Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshot-plugin-txt
+          path: public/snapshot_plugin.txt
+          retention-days: 14
+
+      - name: Setup GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
