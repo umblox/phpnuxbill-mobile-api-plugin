@@ -56,90 +56,200 @@ switch ($action) {
     // =========================================================================
     // 1. DATA PETA KOORDINAT (PELANGGAN, ROUTER & ASET JARINGAN)
     // =========================================================================
-    case 'map_all':
+case 'map_all':
     case 'admin_map_data':
         require_admin_session($api_secret);
         ensure_custom_tables();
 
-        $active_map = [];
-        foreach (ORM::for_table('tbl_user_recharges')->find_array() as $r) {
-            $cid = (int) $r['customer_id'];
-            if (!isset($active_map[$cid]) || $r['status'] === 'on') {
-                $active_map[$cid] = $r;
+        $parse_coords = function ($raw) {
+            $s = trim((string) $raw);
+            if ($s === '') {
+                return null;
             }
-        }
-
-        $customers = [];
-        foreach (ORM::for_table('tbl_customers')->where_not_equal('coordinates', '')->where_not_null('coordinates')->find_array() as $c) {
-            $p = array_map('trim', explode(',', (string) $c['coordinates']));
-            if (count($p) < 2 || !is_numeric($p[0]) || !is_numeric($p[1])) {
-                continue;
+            // Dukung pemisah koma, titik koma, atau spasi ganda; bersihkan karakter non-koordinat
+            $s = str_replace([';', '(', ')', '[', ']'], [',', '', '', '', ''], $s);
+            if (strpos($s, ',') !== false) {
+                $p = array_values(array_filter(array_map('trim', explode(',', $s)), 'strlen'));
+            } else {
+                $p = preg_split('/\s+/', $s);
             }
-            $rech        = $active_map[(int) $c['id']] ?? null;
-            $customers[] = [
-                'id'           => (int) $c['id'],
-                'username'     => $c['username'] ?: '-',
-                'fullname'     => $c['fullname'] ?: $c['username'],
-                'phonenumber'  => $c['phonenumber'] ?: '-',
-                'address'      => str_replace(["\r", "\n"], ' ', $c['address'] ?: '-'),
-                'service_type' => $c['service_type'] ?: 'Hotspot',
-                'lat'          => (float) $p[0],
-                'lng'          => (float) $p[1],
-                'plan_status'  => $rech ? $rech['status'] : 'off',
-                'plan_name'    => $rech ? $rech['namebp'] : 'Non-Paket',
-                'expiration'   => $rech ? $rech['expiration'] : '-'
-            ];
-        }
+            if (!is_array($p) || count($p) < 2 || !is_numeric($p[0]) || !is_numeric($p[1])) {
+                return null;
+            }
+            $lat = (float) $p[0];
+            $lng = (float) $p[1];
+            if (($lat == 0.0 && $lng == 0.0) || $lat < -90.0 || $lat > 90.0 || $lng < -180.0 || $lng > 180.0) {
+                return null;
+            }
+            return [$lat, $lng];
+        };
 
+        $haversine_m = function ($lat1, $lng1, $lat2, $lng2) {
+            $r    = 6371000.0;
+            $dLat = deg2rad($lat2 - $lat1);
+            $dLng = deg2rad($lng2 - $lng1);
+            $a    = sin($dLat / 2) * sin($dLat / 2)
+                + cos(deg2rad($lat1)) * cos(deg2rad($lat2)) * sin($dLng / 2) * sin($dLng / 2);
+            return (int) round($r * (2 * atan2(sqrt($a), sqrt(max(0.0, 1.0 - $a)))));
+        };
+
+        // 1. Router Server (menggunakan nilai coverage asli dari settingan web tbl_routers.coverage dalam meter)
         $routers = [];
         foreach (ORM::for_table('tbl_routers')->find_array() as $r) {
-            if (empty($r['coordinates'])) {
+            $coord = $parse_coords($r['coordinates'] ?? '');
+            if (!$coord) {
                 continue;
             }
-            $p = array_map('trim', explode(',', (string) $r['coordinates']));
-            if (count($p) < 2 || !is_numeric($p[0]) || !is_numeric($p[1])) {
-                continue;
-            }
+            $rawCov    = trim((string) ($r['coverage'] ?? '0'));
+            $covMeters = (int) preg_replace('/[^0-9]/', '', $rawCov);
             $routers[] = [
-                'id'          => (int) $r['id'],
-                'name'        => $r['name'],
-                'ip_address'  => $r['ip_address'],
-                'description' => str_replace(["\r", "\n"], ' ', $r['description'] ?: ''),
-                'coverage'    => (int) ($r['coverage'] ?: 350),
-                'lat'         => (float) $p[0],
-                'lng'         => (float) $p[1]
+                'id'            => (int) $r['id'],
+                'name'          => (string) ($r['name'] ?: 'Router'),
+                'ip_address'    => (string) ($r['ip_address'] ?: '-'),
+                'description'   => str_replace(["\r", "\n"], ' ', (string) ($r['description'] ?: '')),
+                'status'        => (string) ($r['status'] ?? 'Online'),
+                'enabled'       => (int) ($r['enabled'] ?? 1),
+                'coverage'      => max(0, $covMeters),
+                'covered_count' => 0,
+                'lat'           => $coord[0],
+                'lng'           => $coord[1]
             ];
         }
 
+        // 2. Pelanggan + Analisis Jarak & Status Cakupan Radius Router
+        $active_map = [];
+        foreach (ORM::for_table('tbl_user_recharges')->find_array() as $ur) {
+            $cid = (int) $ur['customer_id'];
+            if (!isset($active_map[$cid]) || $ur['status'] === 'on') {
+                $active_map[$cid] = $ur;
+            }
+        }
+
+        $customers      = [];
+        $covered_total  = 0;
+        $uncovered_total = 0;
+
+        foreach (ORM::for_table('tbl_customers')->where_not_equal('coordinates', '')->where_not_null('coordinates')->find_array() as $c) {
+            $coord = $parse_coords($c['coordinates'] ?? '');
+            if (!$coord) {
+                continue;
+            }
+            $rech = $active_map[(int) $c['id']] ?? null;
+
+            $covered_by_list  = [];
+            $nearest_router   = '';
+            $nearest_distance = -1;
+
+            foreach ($routers as $rIdx => $rt) {
+                $dist = $haversine_m($coord[0], $coord[1], $rt['lat'], $rt['lng']);
+                if ($nearest_distance < 0 || $dist < $nearest_distance) {
+                    $nearest_distance = $dist;
+                    $nearest_router   = $rt['name'];
+                }
+                if ($rt['coverage'] > 0 && $dist <= $rt['coverage']) {
+                    $covered_by_list[] = [
+                        'name'     => $rt['name'],
+                        'distance' => $dist,
+                        'coverage' => $rt['coverage']
+                    ];
+                    $routers[$rIdx]['covered_count']++;
+                }
+            }
+
+            usort($covered_by_list, function ($a, $b) {
+                return $a['distance'] <=> $b['distance'];
+            });
+
+            $is_covered = count($covered_by_list) > 0;
+            if ($is_covered) {
+                $covered_total++;
+            } else {
+                $uncovered_total++;
+            }
+
+            $covered_labels = array_map(function ($it) {
+                return $it['name'] . ' (' . $it['distance'] . ' m / radius ' . $it['coverage'] . ' m)';
+            }, $covered_by_list);
+
+            $customers[] = [
+                'id'                 => (int) $c['id'],
+                'username'           => (string) ($c['username'] ?: '-'),
+                'fullname'           => (string) ($c['fullname'] ?: $c['username']),
+                'phonenumber'        => (string) ($c['phonenumber'] ?: ''),
+                'address'            => str_replace(["\r", "\n"], ' ', (string) ($c['address'] ?: '-')),
+                'service_type'       => (string) ($c['service_type'] ?: 'Hotspot'),
+                'lat'                => $coord[0],
+                'lng'                => $coord[1],
+                'plan_status'        => $rech ? (string) $rech['status'] : 'off',
+                'plan_name'          => $rech ? (string) $rech['namebp'] : 'Non-Paket',
+                'router_name'        => $rech ? (string) ($rech['routers'] ?? '') : '',
+                'expiration'         => $rech ? (string) $rech['expiration'] : '-',
+                'is_covered'         => $is_covered,
+                'covered_by'         => implode(', ', $covered_labels),
+                'nearest_router'     => $nearest_router,
+                'nearest_distance_m' => $nearest_distance
+            ];
+        }
+
+        // 3. Titik ODP (tbl_odps bawaan PHPNuxBill)
+        $odps = [];
+        try {
+            foreach (ORM::for_table('tbl_odps')->find_array() as $odp) {
+                $coord = $parse_coords($odp['coordinates'] ?? '');
+                if (!$coord) {
+                    continue;
+                }
+                $odps[] = [
+                    'id'          => (int) $odp['id'],
+                    'name'        => (string) ($odp['name'] ?: 'ODP'),
+                    'port_amount' => (int) ($odp['port_amount'] ?? 0),
+                    'attenuation' => (string) ($odp['attenuation'] ?? '0'),
+                    'address'     => str_replace(["\r", "\n"], ' ', (string) ($odp['address'] ?: '-')),
+                    'coverage'    => max(0, (int) preg_replace('/[^0-9]/', '', (string) ($odp['coverage'] ?? '0'))),
+                    'lat'         => $coord[0],
+                    'lng'         => $coord[1]
+                ];
+            }
+        } catch (Throwable $e) {
+        }
+
+        // 4. Inventaris Aset Jaringan (tbl_assets)
         $assets = [];
         try {
             foreach (ORM::for_table('tbl_assets')->find_array() as $a) {
-                if (empty($a['coordinates'])) {
-                    continue;
-                }
-                $p = array_map('trim', explode(',', (string) $a['coordinates']));
-                if (count($p) < 2 || !is_numeric($p[0]) || !is_numeric($p[1])) {
+                $coord = $parse_coords($a['coordinates'] ?? '');
+                if (!$coord) {
                     continue;
                 }
                 $assets[] = [
                     'id'        => (int) $a['id'],
-                    'name'      => $a['name'],
-                    'category'  => $a['category'],
-                    'condition' => $a['condition_status'],
-                    'lat'       => (float) $p[0],
-                    'lng'       => (float) $p[1]
+                    'name'      => (string) ($a['name'] ?: 'Asset'),
+                    'category'  => (string) ($a['category'] ?: 'Asset'),
+                    'condition' => (string) ($a['condition_status'] ?: 'Good'),
+                    'location'  => str_replace(["\r", "\n"], ' ', (string) ($a['location'] ?: '')),
+                    'lat'       => $coord[0],
+                    'lng'       => $coord[1]
                 ];
             }
         } catch (Throwable $e) {
         }
 
         api_out(true, 'Data peta berhasil dimuat', [
-            'customers' => $customers,
+            'summary' => [
+                'routers_count'       => count($routers),
+                'customers_count'     => count($customers),
+                'covered_customers'   => $covered_total,
+                'uncovered_customers' => $uncovered_total,
+                'odps_count'          => count($odps),
+                'assets_count'        => count($assets)
+            ],
             'routers'   => $routers,
+            'customers' => $customers,
+            'odps'      => $odps,
             'assets'    => $assets
         ]);
         break;
-
+    
     // =========================================================================
     // 2. MANAJEMEN KUPON PROMO (tbl_coupons)
     // =========================================================================
