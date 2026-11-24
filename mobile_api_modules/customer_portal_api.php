@@ -717,6 +717,7 @@ switch ($action) {
         if (!$trx) {
             api_out(false, class_exists('Lang') ? Lang::T('Payment not found') : 'Tagihan tidak ditemukan.', null, 404);
         }
+        $was_paid_before = verify_already_recharged($trx);
         check_and_expire_trx($trx);
         $gw_lower          = strtolower(trim((string) ($trx['gateway'] ?? '')));
         $can_query_gateway = ($gw_lower === 'viaqris') || !empty($trx['gateway_trx_id']);
@@ -744,6 +745,10 @@ switch ($action) {
             $trx                             = ORM::for_table('tbl_payment_gateway')->find_one($trx_id);
         }
         $is_paid = verify_already_recharged($trx);
+        if (!$was_paid_before && $is_paid && strtolower(trim((string) ($trx['routers'] ?? ''))) === 'balance') {
+        $amtFmt = class_exists('Lang') ? Lang::moneyFormat((float) $trx['price']) : (($config['currency_code'] ?? 'Rp.') . ' ' . number_format((float) $trx['price'], 0, ',', '.'));
+        notify_telegram_admin("#u{$user['username']} {$user['fullname']} #deposit #Balance\n{$trx['plan_name']}\nGateway: {$trx['gateway']}\nPrice: {$amtFmt}", true);
+        }
         api_out(true, $is_paid ? (class_exists('Lang') ? Lang::T('Transaction has been paid.') : 'Pembayaran diterima!') : (class_exists('Lang') ? Lang::T('Transaction still unpaid.') : 'Menunggu pembayaran.'), [
             'paid' => $is_paid,
             'bill' => parse_qris_trx($trx, $config)
