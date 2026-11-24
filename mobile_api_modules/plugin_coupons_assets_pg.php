@@ -52,6 +52,82 @@ if (!function_exists('get_valid_payment_gateway_names')) {
     }
 }
 
+if (!function_exists('get_table_columns_map')) {
+    function get_table_columns_map($table)
+    {
+        $cols = [];
+        try {
+            $db = ORM::get_db();
+            foreach ($db->query("SHOW COLUMNS FROM `{$table}`")->fetchAll(PDO::FETCH_ASSOC) as $c) {
+                $cols[strtolower($c['Field'])] = true;
+            }
+        } catch (Throwable $e) {
+        }
+        return $cols;
+    }
+}
+
+if (!function_exists('resolve_asset_manager_fks')) {
+    /**
+     * Resolusi atau buat otomatis Category, Brand, dan Model agar kompatibel 100%
+     * dengan Foreign Key plugin resmi Focuslinks-Tech/PHPNuxBill-Assets-Manager.
+     */
+    function resolve_asset_manager_fks($cat_id, $cat_name, $brand_id, $brand_name, $model_id, $model_name)
+    {
+        // 1. Category
+        $cid = (int) $cat_id;
+        if ($cid <= 0) {
+            $cname = trim((string) $cat_name) ?: 'Network Equipment';
+            $cat   = ORM::for_table('tbl_asset_categories')->where('name', $cname)->find_one();
+            if (!$cat) {
+                $cat              = ORM::for_table('tbl_asset_categories')->create();
+                $cat->name        = $cname;
+                $cat->description = 'Created via Mobile App';
+                $cat->status      = 'Active';
+                $cat->save();
+            }
+            $cid = (int) $cat->id();
+        }
+
+        // 2. Brand
+        $bid = (int) $brand_id;
+        if ($bid <= 0) {
+            $bname = trim((string) $brand_name) ?: 'Generic';
+            $br    = ORM::for_table('tbl_asset_brands')->where('name', $bname)->find_one();
+            if (!$br) {
+                $br              = ORM::for_table('tbl_asset_brands')->create();
+                $br->name        = $bname;
+                $br->description = 'Created via Mobile App';
+                $br->status      = 'Active';
+                $br->save();
+            }
+            $bid = (int) $br->id();
+        }
+
+        // 3. Model (terikat ke brand_id)
+        $mid = (int) $model_id;
+        if ($mid <= 0) {
+            $mname = trim((string) $model_name) ?: 'Standard';
+            $md    = ORM::for_table('tbl_asset_models')
+                ->where('brand_id', $bid)
+                ->where('name', $mname)
+                ->find_one();
+            if (!$md) {
+                $md               = ORM::for_table('tbl_asset_models')->create();
+                $md->brand_id     = $bid;
+                $md->name         = $mname;
+                $md->model_number = '';
+                $md->description  = 'Created via Mobile App';
+                $md->status       = 'Active';
+                $md->save();
+            }
+            $mid = (int) $md->id();
+        }
+
+        return [$cid, $bid, $mid];
+    }
+}
+
 switch ($action) {
     // =========================================================================
     // 1. DATA PETA KOORDINAT (PELANGGAN, ROUTER & ASET JARINGAN)
@@ -66,22 +142,46 @@ case 'map_all':
             if ($s === '') {
                 return null;
             }
-            // Dukung pemisah koma, titik koma, atau spasi ganda; bersihkan karakter non-koordinat
-            $s = str_replace([';', '(', ')', '[', ']'], [',', '', '', '', ''], $s);
-            if (strpos($s, ',') !== false) {
-                $p = array_values(array_filter(array_map('trim', explode(',', $s)), 'strlen'));
-            } else {
-                $p = preg_split('/\s+/', $s);
+            $normalize = function ($lat, $lng) {
+                if (($lat == 0.0 && $lng == 0.0) || $lat < -90.0 || $lat > 90.0) {
+                    return null;
+                }
+                // Normalisasi longitude hasil geser peta Leaflet (mis. 2270.599 -> 110.599) ke rentang [-180, 180]
+                if ($lng < -180.0 || $lng > 180.0) {
+                    $lng = fmod(fmod($lng + 180.0, 360.0) + 360.0, 360.0) - 180.0;
+                }
+                return [$lat, $lng];
+            };
+
+            $clean = str_replace([';', '(', ')', '[', ']'], [',', '', '', '', ''], $s);
+            if (strpos($clean, ',') !== false) {
+                $p = array_values(array_filter(array_map('trim', explode(',', $clean)), 'strlen'));
+                if (count($p) >= 2 && is_numeric($p[0]) && is_numeric($p[1])) {
+                    $res = $normalize((float) $p[0], (float) $p[1]);
+                    if ($res !== null) {
+                        return $res;
+                    }
+                }
             }
-            if (!is_array($p) || count($p) < 2 || !is_numeric($p[0]) || !is_numeric($p[1])) {
-                return null;
+            if (preg_match_all('/-?\d+(?:\.\d+)?/', $s, $m) && count($m[0]) >= 2) {
+                return $normalize((float) $m[0][0], (float) $m[0][1]);
             }
-            $lat = (float) $p[0];
-            $lng = (float) $p[1];
-            if (($lat == 0.0 && $lng == 0.0) || $lat < -90.0 || $lat > 90.0 || $lng < -180.0 || $lng > 180.0) {
-                return null;
+            return null;
+        };
+
+        $parse_coverage_m = function ($raw) {
+            $s = strtolower(trim((string) $raw));
+            if ($s === '' || $s === '0') {
+                return 0;
             }
-            return [$lat, $lng];
+            if (preg_match('/(\d+(?:[.,]\d+)?)/', $s, $m)) {
+                $num = (float) str_replace(',', '.', $m[1]);
+                if (strpos($s, 'km') !== false) {
+                    return (int) round($num * 1000.0);
+                }
+                return (int) round($num);
+            }
+            return 0;
         };
 
         $haversine_m = function ($lat1, $lng1, $lat2, $lng2) {
@@ -93,15 +193,17 @@ case 'map_all':
             return (int) round($r * (2 * atan2(sqrt($a), sqrt(max(0.0, 1.0 - $a)))));
         };
 
-        // 1. Router Server (menggunakan nilai coverage asli dari settingan web tbl_routers.coverage dalam meter)
-        $routers = [];
+        // 1. Router Server (membaca koordinat & coverage asli dari tbl_routers)
+        $routers              = [];
+        $unmapped_router_names = [];
         foreach (ORM::for_table('tbl_routers')->find_array() as $r) {
-            $coord = $parse_coords($r['coordinates'] ?? '');
+            $rawCoord = (string) ($r['coordinates'] ?? '');
+            $coord    = $parse_coords($rawCoord);
             if (!$coord) {
+                $unmapped_router_names[] = (string) ($r['name'] ?: ('Router #' . $r['id']));
                 continue;
             }
-            $rawCov    = trim((string) ($r['coverage'] ?? '0'));
-            $covMeters = (int) preg_replace('/[^0-9]/', '', $rawCov);
+            $covMeters = $parse_coverage_m($r['coverage'] ?? '0');
             $routers[] = [
                 'id'            => (int) $r['id'],
                 'name'          => (string) ($r['name'] ?: 'Router'),
@@ -213,22 +315,59 @@ case 'map_all':
         } catch (Throwable $e) {
         }
 
-        // 4. Inventaris Aset Jaringan (tbl_assets)
+        // 4. Inventaris Aset Jaringan
         $assets = [];
         try {
-            foreach (ORM::for_table('tbl_assets')->find_array() as $a) {
-                $coord = $parse_coords($a['coordinates'] ?? '');
+            $asset_cols    = get_table_columns_map('tbl_assets');
+            $is_focuslinks = isset($asset_cols['category_id']) || isset($asset_cols['latitude']);
+            if ($is_focuslinks) {
+                $a_rows = ORM::for_table('tbl_assets')
+                    ->select('tbl_assets.*')
+                    ->select('tbl_asset_categories.name', 'category_name')
+                    ->select('tbl_asset_brands.name', 'brand_name')
+                    ->select('tbl_asset_models.name', 'model_name')
+                    ->select('tbl_customers.fullname', 'assigned_to_name')
+                    ->left_outer_join('tbl_asset_categories', ['tbl_assets.category_id', '=', 'tbl_asset_categories.id'])
+                    ->left_outer_join('tbl_asset_brands', ['tbl_assets.brand_id', '=', 'tbl_asset_brands.id'])
+                    ->left_outer_join('tbl_asset_models', ['tbl_assets.model_id', '=', 'tbl_asset_models.id'])
+                    ->left_outer_join('tbl_customers', ['tbl_assets.assigned_to', '=', 'tbl_customers.id'])
+                    ->find_array();
+            } else {
+                $a_rows = ORM::for_table('tbl_assets')->find_array();
+            }
+
+            foreach ($a_rows as $a) {
+                $coord = null;
+                if (isset($a['latitude'], $a['longitude']) && is_numeric($a['latitude']) && is_numeric($a['longitude'])) {
+                    $latVal = (float) $a['latitude'];
+                    $lngVal = (float) $a['longitude'];
+                    if ($latVal != 0.0 || $lngVal != 0.0) {
+                        $coord = [$latVal, $lngVal];
+                    }
+                }
+                if (!$coord && !empty($a['coordinates'])) {
+                    $coord = $parse_coords($a['coordinates']);
+                }
                 if (!$coord) {
                     continue;
                 }
+                $catLabel = (string) ($a['category_name'] ?? ($a['category'] ?? 'Asset'));
+                $brLabel  = (string) ($a['brand_name'] ?? ($a['brand'] ?? ''));
+                $mdLabel  = (string) ($a['model_name'] ?? '');
+                $tagLabel = (string) ($a['asset_tag'] ?? '');
                 $assets[] = [
-                    'id'        => (int) $a['id'],
-                    'name'      => (string) ($a['name'] ?: 'Asset'),
-                    'category'  => (string) ($a['category'] ?: 'Asset'),
-                    'condition' => (string) ($a['condition_status'] ?: 'Good'),
-                    'location'  => str_replace(["\r", "\n"], ' ', (string) ($a['location'] ?: '')),
-                    'lat'       => $coord[0],
-                    'lng'       => $coord[1]
+                    'id'          => (int) $a['id'],
+                    'asset_tag'   => $tagLabel,
+                    'name'        => (string) ($a['name'] ?: 'Asset'),
+                    'category'    => $catLabel,
+                    'brand'       => $brLabel,
+                    'model'       => $mdLabel,
+                    'status'      => (string) ($a['status'] ?? 'Active'),
+                    'condition'   => (string) ($a['condition_status'] ?? 'Good'),
+                    'location'    => str_replace(["\r", "\n"], ' ', (string) ($a['location'] ?? '')),
+                    'assigned_to' => (string) ($a['assigned_to_name'] ?? ''),
+                    'lat'         => $coord[0],
+                    'lng'         => $coord[1]
                 ];
             }
         } catch (Throwable $e) {
@@ -241,7 +380,8 @@ case 'map_all':
                 'covered_customers'   => $covered_total,
                 'uncovered_customers' => $uncovered_total,
                 'odps_count'          => count($odps),
-                'assets_count'        => count($assets)
+                'assets_count'        => count($assets),
+                'unmapped_routers'    => count($unmapped_router_names)
             ],
             'routers'   => $routers,
             'customers' => $customers,
@@ -249,7 +389,7 @@ case 'map_all':
             'assets'    => $assets
         ]);
         break;
-    
+        
     // =========================================================================
     // 2. MANAJEMEN KUPON PROMO (tbl_coupons)
     // =========================================================================
@@ -423,68 +563,243 @@ case 'map_all':
     // =========================================================================
     // 3. MANAJEMEN ASET JARINGAN / INVENTARIS (tbl_assets)
     // =========================================================================
-    case 'assets':
+case 'assets':
     case 'admin_assets':
-        require_admin_session($api_secret);
+        require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
         ensure_custom_tables();
-        $assets = ORM::for_table('tbl_assets')->order_by_desc('id')->find_array();
-        $val    = ORM::for_table('tbl_assets')->sum('cost') ?: 0;
+        $asset_cols    = get_table_columns_map('tbl_assets');
+        $is_focuslinks = isset($asset_cols['purchase_cost']) || isset($asset_cols['category_id']);
+
+        $normalized = [];
+        $total_val  = 0.0;
+        $meta       = ['categories' => [], 'brands' => [], 'models' => []];
+
+        if ($is_focuslinks) {
+            $rows = ORM::for_table('tbl_assets')
+                ->select('tbl_assets.*')
+                ->select('tbl_asset_categories.name', 'category_name')
+                ->select('tbl_asset_brands.name', 'brand_name')
+                ->select('tbl_asset_models.name', 'model_name')
+                ->select('tbl_customers.fullname', 'assigned_to_name')
+                ->left_outer_join('tbl_asset_categories', ['tbl_assets.category_id', '=', 'tbl_asset_categories.id'])
+                ->left_outer_join('tbl_asset_brands', ['tbl_assets.brand_id', '=', 'tbl_asset_brands.id'])
+                ->left_outer_join('tbl_asset_models', ['tbl_assets.model_id', '=', 'tbl_asset_models.id'])
+                ->left_outer_join('tbl_customers', ['tbl_assets.assigned_to', '=', 'tbl_customers.id'])
+                ->order_by_desc('tbl_assets.id')
+                ->find_array();
+
+            foreach ($rows as $r) {
+                $costVal = (float) ($r['purchase_cost'] ?? 0);
+                $total_val += $costVal;
+                $latStr = (isset($r['latitude']) && $r['latitude'] !== '' && $r['latitude'] !== null) ? (string) $r['latitude'] : '';
+                $lngStr = (isset($r['longitude']) && $r['longitude'] !== '' && $r['longitude'] !== null) ? (string) $r['longitude'] : '';
+                $coords = ($latStr !== '' && $lngStr !== '') ? ($latStr . ', ' . $lngStr) : '';
+
+                $normalized[] = [
+                    'id'               => (int) $r['id'],
+                    'asset_tag'        => (string) ($r['asset_tag'] ?? ''),
+                    'name'             => (string) ($r['name'] ?? ''),
+                    'category_id'      => (int) ($r['category_id'] ?? 0),
+                    'category'         => (string) ($r['category_name'] ?? 'Uncategorized'),
+                    'brand_id'         => (int) ($r['brand_id'] ?? 0),
+                    'brand'            => (string) ($r['brand_name'] ?? ''),
+                    'model_id'         => (int) ($r['model_id'] ?? 0),
+                    'model_name'       => (string) ($r['model_name'] ?? ''),
+                    'serial_number'    => (string) ($r['serial_number'] ?? ''),
+                    'description'      => (string) ($r['description'] ?? ''),
+                    'cost'             => $costVal,
+                    'purchase_cost'    => $costVal,
+                    'purchase_date'    => (string) ($r['purchase_date'] ?? ''),
+                    'warranty_expiry'  => (string) ($r['warranty_expiry'] ?? ''),
+                    'location'         => (string) ($r['location'] ?? ''),
+                    'latitude'         => $latStr,
+                    'longitude'        => $lngStr,
+                    'coordinates'      => $coords,
+                    'assigned_to'      => (int) ($r['assigned_to'] ?? 0),
+                    'assigned_to_name' => (string) ($r['assigned_to_name'] ?? ''),
+                    'status'           => (string) ($r['status'] ?? 'Active'),
+                    'condition_status' => (string) ($r['condition_status'] ?? 'Good'),
+                    'notes'            => (string) ($r['notes'] ?? '')
+                ];
+            }
+
+            try {
+                $meta['categories'] = ORM::for_table('tbl_asset_categories')->where('status', 'Active')->order_by_asc('name')->find_array();
+                $meta['brands']     = ORM::for_table('tbl_asset_brands')->where('status', 'Active')->order_by_asc('name')->find_array();
+                $meta['models']     = ORM::for_table('tbl_asset_models')->where('status', 'Active')->order_by_asc('name')->find_array();
+            } catch (Throwable $e) {
+            }
+        } else {
+            $rows = ORM::for_table('tbl_assets')->order_by_desc('id')->find_array();
+            foreach ($rows as $r) {
+                $costVal = (float) ($r['cost'] ?? 0);
+                $total_val += $costVal;
+                $normalized[] = [
+                    'id'               => (int) $r['id'],
+                    'asset_tag'        => 'AST-' . $r['id'],
+                    'name'             => (string) ($r['name'] ?? ''),
+                    'category_id'      => 0,
+                    'category'         => (string) ($r['category'] ?? 'ODP/ODC'),
+                    'brand_id'         => 0,
+                    'brand'            => (string) ($r['brand'] ?? ''),
+                    'model_id'         => 0,
+                    'model_name'       => '',
+                    'serial_number'    => (string) ($r['serial_number'] ?? ''),
+                    'description'      => '',
+                    'cost'             => $costVal,
+                    'purchase_cost'    => $costVal,
+                    'purchase_date'    => (string) ($r['purchase_date'] ?? ''),
+                    'warranty_expiry'  => '',
+                    'location'         => (string) ($r['location'] ?? ''),
+                    'latitude'         => '',
+                    'longitude'        => '',
+                    'coordinates'      => (string) ($r['coordinates'] ?? ''),
+                    'assigned_to'      => 0,
+                    'assigned_to_name' => '',
+                    'status'           => 'Active',
+                    'condition_status' => (string) ($r['condition_status'] ?? 'Good'),
+                    'notes'            => (string) ($r['notes'] ?? '')
+                ];
+            }
+        }
+
         api_out(true, 'Daftar aset dimuat', [
-            'summary' => ['total_items' => count($assets), 'total_value' => (float) $val],
-            'assets'  => $assets
+            'summary' => [
+                'total_items' => count($normalized),
+                'total_value' => (float) $total_val
+            ],
+            'schema'  => $is_focuslinks ? 'focuslinks' : 'simple',
+            'meta'    => $meta,
+            'assets'  => $normalized
         ]);
         break;
 
     case 'asset_save':
     case 'admin_asset_save':
         $admin = require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
-        if (strtolower((string) ($_app_stage ?? '')) === 'demo') {
-            api_out(false, 'You cannot perform this action in Demo mode', null, 403);
-        }
         ensure_custom_tables();
-
         $id   = (int) _post('id');
         $name = trim((string) _post('name'));
         if ($name === '') {
             api_out(false, 'Nama aset wajib diisi.', null, 400);
         }
 
+        $asset_cols    = get_table_columns_map('tbl_assets');
+        $is_focuslinks = isset($asset_cols['purchase_cost']) || isset($asset_cols['category_id']);
+
         $a = ($id > 0) ? ORM::for_table('tbl_assets')->find_one($id) : ORM::for_table('tbl_assets')->create();
         if (!$a) {
             api_out(false, 'Data aset tidak ditemukan.', null, 404);
         }
 
-        $a->name             = $name;
-        $a->category         = trim((string) (_post('category') ?: 'ODP/ODC'));
-        $a->brand            = trim((string) (_post('brand') ?: ($a['brand'] ?? '')));
-        $a->serial_number    = trim((string) _post('serial_number'));
-        $a->cost             = (float) (_post('cost') ?: 0);
-        $a->location         = trim((string) (_post('location') ?: ($a['location'] ?? '')));
-        $a->coordinates      = trim((string) _post('coordinates'));
-        $a->condition_status = trim((string) (_post('condition_status') ?: 'Good'));
-        $a->notes            = trim((string) (_post('notes') ?: ($a['notes'] ?? '')));
-        if ($id === 0) {
-            $a->purchase_date = trim((string) (_post('purchase_date') ?: date('Y-m-d')));
+        $rawCost = _post('purchase_cost');
+        if ($rawCost === null || $rawCost === '') {
+            $rawCost = _post('cost');
         }
-        $a->save();
+        $costVal = (float) ($rawCost ?: 0);
 
-        write_admin_log($admin, ($id > 0 ? 'Mengubah' : 'Menambah') . ' Aset Jaringan: ' . $name);
+        $rawCond = trim((string) (_post('condition_status') ?: 'Good'));
+        if (strcasecmp($rawCond, 'Broken') === 0) {
+            $rawCond = 'Poor';
+        }
+        if (!in_array($rawCond, ['Excellent', 'Good', 'Fair', 'Poor'], true)) {
+            $rawCond = 'Good';
+        }
+
+        $rawStatus = trim((string) (_post('status') ?: 'Active'));
+        if (!in_array($rawStatus, ['Active', 'Inactive', 'Under Maintenance', 'Disposed'], true)) {
+            $rawStatus = 'Active';
+        }
+
+        if ($is_focuslinks) {
+            list($cid, $bid, $mid) = resolve_asset_manager_fks(
+                (int) _post('category_id'),
+                trim((string) (_post('category') ?: 'Network Equipment')),
+                (int) _post('brand_id'),
+                trim((string) (_post('brand') ?: 'Generic')),
+                (int) _post('model_id'),
+                trim((string) (_post('model_name') ?: (_post('model') ?: 'Standard')))
+            );
+
+            $assetTag = trim((string) _post('asset_tag'));
+            if ($assetTag === '') {
+                $assetTag = ($id > 0 && !empty($a['asset_tag']))
+                    ? (string) $a['asset_tag']
+                    : ('AST-' . date('ymd') . '-' . rand(1000, 9999));
+            }
+            $dupTag = ORM::for_table('tbl_assets')->where('asset_tag', $assetTag);
+            if ($id > 0) {
+                $dupTag->where_not_equal('id', $id);
+            }
+            if ($dupTag->count() > 0) {
+                api_out(false, 'Asset Tag "' . $assetTag . '" sudah digunakan aset lain.', null, 400);
+            }
+
+            $lat = trim((string) _post('latitude'));
+            $lng = trim((string) _post('longitude'));
+            $rawCoords = trim((string) _post('coordinates'));
+            if (($lat === '' || $lng === '') && $rawCoords !== '') {
+                $parts = array_values(array_filter(array_map('trim', explode(',', str_replace(';', ',', $rawCoords))), 'strlen'));
+                if (count($parts) >= 2 && is_numeric($parts[0]) && is_numeric($parts[1])) {
+                    $lat = $parts[0];
+                    $lng = $parts[1];
+                }
+            }
+
+            $pDate = trim((string) _post('purchase_date'));
+            $wDate = trim((string) _post('warranty_expiry'));
+            $assId = (int) _post('assigned_to');
+
+            $a->category_id      = $cid;
+            $a->brand_id         = $bid;
+            $a->model_id         = $mid;
+            $a->asset_tag        = $assetTag;
+            $a->name             = $name;
+            $a->serial_number    = trim((string) _post('serial_number'));
+            $a->description      = trim((string) (_post('description') ?: ($a['description'] ?? '')));
+            $a->purchase_cost    = $costVal;
+            $a->purchase_date    = ($pDate !== '') ? $pDate : ($id === 0 ? date('Y-m-d') : ($a['purchase_date'] ?: null));
+            $a->warranty_expiry  = ($wDate !== '') ? $wDate : null;
+            $a->location         = trim((string) (_post('location') ?: ''));
+            $a->latitude         = ($lat !== '' && is_numeric($lat)) ? (float) $lat : null;
+            $a->longitude        = ($lng !== '' && is_numeric($lng)) ? (float) $lng : null;
+            $a->assigned_to      = ($assId > 0) ? $assId : null;
+            $a->status           = $rawStatus;
+            $a->condition_status = $rawCond;
+            $a->notes            = trim((string) (_post('notes') ?: ''));
+            if ($id === 0) {
+                $a->created_by = (int) $admin['id'];
+            }
+            $a->save();
+        } else {
+            $a->name             = $name;
+            $a->category         = trim((string) (_post('category') ?: 'ODP/ODC'));
+            $a->brand            = trim((string) (_post('brand') ?: ''));
+            $a->serial_number    = trim((string) _post('serial_number'));
+            $a->cost             = $costVal;
+            $a->location         = trim((string) (_post('location') ?: ''));
+            $a->coordinates      = trim((string) (_post('coordinates') ?: ''));
+            $a->condition_status = $rawCond;
+            $a->notes            = trim((string) (_post('notes') ?: ''));
+            if ($id === 0) {
+                $a->purchase_date = date('Y-m-d');
+            }
+            $a->save();
+        }
+
+        write_admin_log($admin, ($id > 0 ? 'Mengubah' : 'Menambah') . ' aset: ' . $name);
         api_out(true, 'Aset ' . $name . ' berhasil disimpan.', $a->as_array());
         break;
 
     case 'asset_delete':
     case 'admin_asset_delete':
         $admin = require_admin_session($api_secret, ['SuperAdmin', 'Admin']);
-        if (strtolower((string) ($_app_stage ?? '')) === 'demo') {
-            api_out(false, 'You cannot perform this action in Demo mode', null, 403);
-        }
         ensure_custom_tables();
-
         $a = ORM::for_table('tbl_assets')->find_one((int) _req('id'));
         if ($a) {
-            $a_name = $a['name'];
+            $aname = (string) ($a['name'] ?? ('#' . $a['id']));
             $a->delete();
-            write_admin_log($admin, 'Menghapus Aset Jaringan: ' . $a_name);
+            write_admin_log($admin, 'Menghapus aset: ' . $aname);
         }
         api_out(true, 'Aset berhasil dihapus.');
         break;
