@@ -28,6 +28,26 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
 // Muat bootstrap & seluruh fungsi helper bersama
 require_once __DIR__ . '/helpers_common.php';
 
+// Parse JSON body jika request dikirim dengan Content-Type: application/json
+$raw_input = file_get_contents('php://input');
+if ($raw_input !== false && trim($raw_input) !== '') {
+    $content_type = strtolower((string) ($_SERVER['CONTENT_TYPE'] ?? $_SERVER['HTTP_CONTENT_TYPE'] ?? ''));
+    $trimmed_raw  = ltrim($raw_input);
+    if (strpos($content_type, 'application/json') !== false || ($trimmed_raw !== '' && ($trimmed_raw[0] === '{' || $trimmed_raw[0] === '['))) {
+        $json_input = json_decode($raw_input, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            api_out(false, 'Format JSON pada body request tidak valid: ' . json_last_error_msg(), null, 400);
+        }
+        if (is_array($json_input)) {
+            foreach ($json_input as $k => $v) {
+                $_POST[$k]    = $v;
+                $_REQUEST[$k] = $v;
+            }
+        }
+    }
+}
+
+// Gunakan $api_secret global PHPNuxBill jika tersedia, atau fallback ke mobile_api_secret di tbl_appconfig
 if (empty($api_secret)) {
     if (!empty($config['mobile_api_secret'])) {
         $api_secret = $config['mobile_api_secret'];
