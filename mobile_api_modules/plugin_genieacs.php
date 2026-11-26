@@ -1341,6 +1341,14 @@ switch ($action) {
         }
 
         $allExtracted = [];
+        $stats        = [
+            'total'           => 0,
+            'online'          => 0,
+            'offline'         => 0,
+            'bad_rx_count'    => 0,
+            'high_temp_count' => 0
+        ];
+
         if (is_array($result['data'])) {
             foreach ($result['data'] as $d) {
                 if (genieacs_is_junk_bot_device($d)) {
@@ -1350,15 +1358,7 @@ switch ($action) {
                     continue;
                 }
                 $info = genieacs_extract_device_info($d);
-                if ($statusFilter === 'online' && !$info['online']) {
-                    continue;
-                }
-                if ($statusFilter === 'offline' && $info['online']) {
-                    continue;
-                }
-                if ($statusFilter === 'bad_rx' && !in_array($info['rx_power_status'], ['critical', 'los', 'warning'], true)) {
-                    continue;
-                }
+
                 if ($search !== '') {
                     $haystack = strtolower(
                         $info['id'] . ' ' . $info['serial_number'] . ' ' . $info['manufacturer'] . ' ' .
@@ -1369,6 +1369,31 @@ switch ($action) {
                         continue;
                     }
                 }
+
+                // Hitung statistik global SEBELUM penyaringan status_filter agar counter semua chip tetap akurat
+                $stats['total']++;
+                if (!empty($info['online'])) {
+                    $stats['online']++;
+                } else {
+                    $stats['offline']++;
+                }
+                if (!empty($info['is_optical']) && in_array($info['rx_power_status'] ?? '', ['critical', 'los', 'warning'], true)) {
+                    $stats['bad_rx_count']++;
+                }
+                if (!empty($info['is_optical']) && in_array($info['temp_status'] ?? '', ['warning', 'critical'], true)) {
+                    $stats['high_temp_count']++;
+                }
+
+                if ($statusFilter === 'online' && !$info['online']) {
+                    continue;
+                }
+                if ($statusFilter === 'offline' && $info['online']) {
+                    continue;
+                }
+                if ($statusFilter === 'bad_rx' && !in_array($info['rx_power_status'], ['critical', 'los', 'warning'], true)) {
+                    continue;
+                }
+
                 $allExtracted[] = $info;
             }
         }
@@ -1391,6 +1416,7 @@ switch ($action) {
         api_out(true, 'Daftar perangkat GenieACS dimuat', [
             'hosts'       => $hosts,
             'active_host' => $activeHost,
+            'stats'       => $stats,
             'total'       => $total,
             'page'        => $page,
             'limit'       => $limit,
