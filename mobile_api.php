@@ -1,5 +1,4 @@
 <?php
-
 /**
  * PHP Mikrotik Billing (https://github.com/hotspotbilling/phpnuxbill/)
  * Plugin Name: PHPNuxBill Mobile API Bridge
@@ -58,7 +57,6 @@ function mobile_api_config()
         $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
             || (strtolower($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https')
             || ((int) ($_SERVER['SERVER_PORT'] ?? 80) === 443);
-
         $scheme     = $isHttps ? 'https' : 'http';
         $host       = $_SERVER['HTTP_HOST'] ?? 'localhost';
         $script     = str_replace('\\', '/', $_SERVER['SCRIPT_NAME'] ?? '');
@@ -69,7 +67,8 @@ function mobile_api_config()
 
     $moduleDescriptions = [
         'dispatcher.php'               => 'Router Utama & Gerbang Otorisasi Request Mobile API',
-        'helpers_common.php'           => 'Helper Global, Parser Token, & Jembatan Notifikasi Resmi Web (Message Class)',
+        'helpers_common.php'           => 'Helper Global, Parser Token, Gerbang Maintenance & Jembatan Notifikasi Resmi Web (Message Class)',
+        'helpers_payment_gateways.php' => 'Adapter Multi-Payment Gateway (ViaQRIS, Tripay, Duitku, Xendit, PayPal & Generic)',
         'core_auth_dashboard.php'      => 'Autentikasi Admin, Statistik Dasbor, Grafik Bulanan & Widget Expired',
         'core_customers.php'           => 'Manajemen Pelanggan (CRUD, Custom Fields, Sync Router & Welcome Message)',
         'core_services_vouchers.php'   => 'Layanan Aktif, Isi Ulang Paket/Saldo, Generate Voucher, Refill & Struk Resmi',
@@ -131,7 +130,7 @@ function mobile_api_config()
     $ui->assign('_title', 'Mobile App API Configuration');
     $ui->assign('_system_menu', 'settings');
     $ui->assign('_admin', $admin);
-    $ui->assign('api_version', '3.0.0');
+    $ui->assign('api_version', '3.1.0');
     $ui->assign('app_root_url', $appRootUrl);
     $ui->assign('modules', $modulesList);
     $ui->assign('ready_modules_count', $readyCount);
