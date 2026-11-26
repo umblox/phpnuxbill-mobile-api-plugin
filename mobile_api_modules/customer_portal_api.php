@@ -916,7 +916,10 @@ switch ($action) {
             notify_telegram_admin("#u{$user['username']} send balance to #u{$target['username']} \n{$amount}", false);
         });
 
-        api_out(true, class_exists('Lang') ? Lang::T('Sending balance success') : 'Transfer saldo berhasil dikirim!');
+        api_out(true, class_exists('Lang') ? Lang::T('Sending balance success') : 'Transfer saldo berhasil dikirim!', [
+            'invoice'      => 'TRF-' . date('YmdHis'),
+            'friend_phone' => (string) ($target['phonenumber'] ?? '')
+        ]);
         break;
 
     // =========================================================================
@@ -1131,7 +1134,10 @@ switch ($action) {
             $d->save();
         }
 
-        api_out(true, 'Paket ' . $plan['name_plan'] . ' berhasil dikirim ke @' . $target['username'] . '!');
+        api_out(true, 'Paket ' . $plan['name_plan'] . ' berhasil dikirim ke @' . $target['username'] . '!', [
+            'invoice'      => is_string($result_inv) ? $result_inv : ('INV-' . time()),
+            'friend_phone' => (string) ($target['phonenumber'] ?? '')
+        ]);
         break;
 
     // =========================================================================
