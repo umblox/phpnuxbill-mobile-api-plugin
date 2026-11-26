@@ -1,5 +1,4 @@
 <?php
-
 /**
  * PHPNuxBill Mobile API Plugin - Main Dispatcher
  * Path: system/plugin/mobile_api_modules/dispatcher.php
@@ -18,7 +17,7 @@ if (!headers_sent()) {
     header('Content-Type: application/json; charset=utf-8');
     header('Access-Control-Allow-Origin: *');
     header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
-    header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With');
+    header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, X-App-Lang');
 }
 
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
@@ -29,26 +28,6 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
 // Muat bootstrap & seluruh fungsi helper bersama
 require_once __DIR__ . '/helpers_common.php';
 
-// Parse JSON body jika request dikirim dengan Content-Type: application/json
-$raw_input = file_get_contents('php://input');
-if ($raw_input !== false && trim($raw_input) !== '') {
-    $content_type = strtolower((string) ($_SERVER['CONTENT_TYPE'] ?? $_SERVER['HTTP_CONTENT_TYPE'] ?? ''));
-    $trimmed_raw  = ltrim($raw_input);
-    if (strpos($content_type, 'application/json') !== false || ($trimmed_raw !== '' && ($trimmed_raw[0] === '{' || $trimmed_raw[0] === '['))) {
-        $json_input = json_decode($raw_input, true);
-        if (json_last_error() !== JSON_ERROR_NONE) {
-            api_out(false, 'Format JSON pada body request tidak valid: ' . json_last_error_msg(), null, 400);
-        }
-        if (is_array($json_input)) {
-            foreach ($json_input as $k => $v) {
-                $_POST[$k]    = $v;
-                $_REQUEST[$k] = $v;
-            }
-        }
-    }
-}
-
-// Gunakan $api_secret global PHPNuxBill jika tersedia, atau fallback ke mobile_api_secret di tbl_appconfig
 if (empty($api_secret)) {
     if (!empty($config['mobile_api_secret'])) {
         $api_secret = $config['mobile_api_secret'];
@@ -235,7 +214,7 @@ try {
             require __DIR__ . '/plugin_genieacs.php';
             break;
 
-            // 10. Modul Portal APK Pelanggan
+        // 10. Modul Portal APK Pelanggan
         case 'login':
         case 'dashboard':
         case 'plans':
@@ -253,7 +232,7 @@ try {
         case 'customer_inbox_read':
         case 'customer_inbox_delete':
         case 'customer_transfer_balance':
-        case 'customer_lookup_friend':            
+        case 'customer_lookup_friend':
         case 'customer_send_plan':
         case 'customer_sync_plan':
         case 'customer_extend_plan':
@@ -262,30 +241,39 @@ try {
             require __DIR__ . '/customer_portal_api.php';
             break;
 
-
         default:
-            $comp_name = !empty($config['CompanyName']) ? $config['CompanyName'] : 'PHPNuxBill';
-            $curr_code = !empty($config['currency_code']) ? $config['currency_code'] : 'Rp.';
-            $srv_lang  = strtolower(trim((string) ($config['language'] ?? 'indonesia')));
-            $logo_url  = function_exists('get_server_logo_url') ? get_server_logo_url() : '';
-            $is_en     = (strtolower(trim((string) ($_SERVER['HTTP_X_APP_LANG'] ?? _req('lang', '')))) === 'en');
+            $comp_name    = !empty($config['CompanyName']) ? $config['CompanyName'] : 'PHPNuxBill';
+            $curr_code    = !empty($config['currency_code']) ? $config['currency_code'] : 'Rp.';
+            $srv_lang     = strtolower(trim((string) ($config['language'] ?? 'indonesia')));
+            $logo_url     = function_exists('get_server_logo_url') ? get_server_logo_url() : '';
+            $is_en        = (strtolower(trim((string) ($_SERVER['HTTP_X_APP_LANG'] ?? _req('lang', '')))) === 'en');
+            $maint_active = !empty($config['maintenance_mode']) && $config['maintenance_mode'] !== 'no' && $config['maintenance_mode'] !== '0';
+            $maint_logout = !empty($config['maintenance_mode_logout']) && $config['maintenance_mode_logout'] !== 'no' && $config['maintenance_mode_logout'] !== '0';
+            $maint_date   = trim((string) ($config['maintenance_date'] ?? ''));
 
             $welcome_msg = $is_en
-                ? ('Connected to ' . $comp_name . ' (PHPNuxBill Mobile API v3.0.0)')
-                : ('Terhubung ke ' . $comp_name . ' (PHPNuxBill Mobile API v3.0.0)');
+                ? ('Connected to ' . $comp_name . ' (PHPNuxBill Mobile API v3.1.0)')
+                : ('Terhubung ke ' . $comp_name . ' (PHPNuxBill Mobile API v3.1.0)');
 
             api_out(true, $welcome_msg, [
-                'version'       => '3.0.0',
-                'action'        => $action,
-                'company_name'  => $comp_name,
-                'currency_code' => $curr_code,
-                'language'      => $srv_lang,
-                'logo_url'      => $logo_url,
-                'company'       => [
-                    'name'     => $comp_name,
-                    'currency' => $curr_code,
-                    'language' => $srv_lang,
-                    'logo_url' => $logo_url
+                'version'                 => '3.1.0',
+                'action'                  => $action,
+                'company_name'            => $comp_name,
+                'currency_code'           => $curr_code,
+                'language'                => $srv_lang,
+                'logo_url'                => $logo_url,
+                'maintenance_mode'        => $maint_active,
+                'maintenance_mode_logout' => $maint_logout,
+                'maintenance_date'        => $maint_date,
+                'company'                 => [
+                    'name'                    => $comp_name,
+                    'currency'                => $curr_code,
+                    'language'                => $srv_lang,
+                    'logo_url'                => $logo_url,
+                    'phone'                   => $config['phone'] ?? '',
+                    'maintenance_mode'        => $maint_active,
+                    'maintenance_mode_logout' => $maint_logout,
+                    'maintenance_date'        => $maint_date
                 ]
             ]);
             break;
